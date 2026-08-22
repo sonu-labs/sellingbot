@@ -18,7 +18,7 @@ ADMIN_IDS = [int(i) for i in _getenv("ADMIN_IDS", "", required=True).replace(" "
 API_ID = "31175288"
 API_HASH = "aaf1c01a7336f5de2e85638c1c06b0d0"
 
-DATABASE_URL = _getenv("DATABASE_URL", "mongodb+srv://AccountBot:kushwaha12@accountbot.2ga9pv7.mongodb.net/?appName=AccountBot")
+DATABASE_URL = _getenv("DATABASE_URL", "sqlite:///data.db")
 
 
 

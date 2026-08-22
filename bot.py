@@ -25,6 +25,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from pymongo import MongoClient
+from pymongo.errors import ConfigurationError, OperationFailure, ServerSelectionTimeoutError
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from aiogram.utils.deep_linking import create_start_link
@@ -40,8 +41,61 @@ from mustjoin import check_join
 from config import BOT_TOKEN, ADMIN_IDS
 
 # ================= MongoDB Setup =================
-MONGO_URI = os.getenv("MONGO_URI") or "mongodb+srv://AccountBot:kushwaha12@accountbot.2ga9pv7.mongodb.net/?appName=AccountBot"
-client = MongoClient(MONGO_URI)
+def _redact_mongo_uri(uri: str) -> str:
+    """Return a safe-to-log MongoDB URI with the password hidden."""
+    if "://" not in uri or "@" not in uri:
+        return uri
+    scheme, rest = uri.split("://", 1)
+    credentials, hosts = rest.split("@", 1)
+    if ":" not in credentials:
+        return f"{scheme}://{credentials}@{hosts}"
+    username, _password = credentials.split(":", 1)
+    return f"{scheme}://{username}:***@{hosts}"
+
+
+def _get_mongo_uri() -> str:
+    """Read the MongoDB connection string from environment variables.
+
+    MONGO_URI is preferred. MONGODB_URI is accepted as an alias. DATABASE_URL is
+    accepted only when it actually contains a MongoDB URI, which keeps older
+    deployments working without accidentally trying to use a Postgres/SQLite URL.
+    """
+    uri = (os.getenv("MONGO_URI") or os.getenv("MONGODB_URI") or "").strip()
+    database_url = (os.getenv("DATABASE_URL") or "").strip()
+    if not uri and database_url.startswith(("mongodb://", "mongodb+srv://")):
+        uri = database_url
+
+    if not uri:
+        raise RuntimeError(
+            "Missing MongoDB connection string. Set MONGO_URI in your hosting panel "
+            "(or MONGODB_URI / DATABASE_URL with a mongodb+srv:// URI)."
+        )
+    return uri
+
+
+def _create_mongo_client() -> MongoClient:
+    uri = _get_mongo_uri()
+    try:
+        client = MongoClient(uri, serverSelectionTimeoutMS=10000)
+        # PyMongo connects lazily; ping here so bad credentials fail with a clear
+        # startup error instead of crashing later inside an unrelated handler.
+        client.admin.command("ping")
+        return client
+    except OperationFailure as exc:
+        raise RuntimeError(
+            "MongoDB authentication failed. Check that the hosting env var MONGO_URI "
+            f"contains the latest Atlas username/password: {_redact_mongo_uri(uri)}. "
+            "Also verify the Atlas database user's password and permissions."
+        ) from exc
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
+        raise RuntimeError(
+            "Could not connect to MongoDB. Check MONGO_URI format, Atlas network access/IP allowlist, "
+            f"and cluster status. Current URI: {_redact_mongo_uri(uri)}"
+        ) from exc
+
+
+MONGO_URI = _get_mongo_uri()
+client = _create_mongo_client()
 db = client["TGAStoreBot"]
 users_col = db["users"]
 orders_col = db["orders"]

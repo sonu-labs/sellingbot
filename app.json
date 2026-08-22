@@ -20,8 +20,13 @@
       "value": "",
       "required": true
     },
+    "MONGO_URI": {
+      "description": "MongoDB Atlas connection string, e.g. mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority",
+      "value": "",
+      "required": true
+    },
     "DATABASE_URL": {
-      "description": "Database connection URL (e.g. Postgres, Mongo, or SQLite)",
+      "description": "Optional legacy SQL database URL; MongoDB must be configured with MONGO_URI.",
       "value": "sqlite:///data.db",
       "required": false
     },
