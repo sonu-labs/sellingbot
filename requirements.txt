@@ -1,0 +1,13 @@
+aiogram==3.*
+pymongo==4.*
+python-dotenv==1.*
+requests==2.*
+gunicorn==21.*
+google-api-python-client==2.100.0
+google-auth==2.21.0
+telethon==1.31.0
+motor
+python-binance==1.0.19
+fastapi
+uvicorn[standard]
+requests
