@@ -125,6 +125,10 @@ class BanCheckMiddleware(BaseMiddleware):
         
 # ================= Bot Setup =================
 bot = RichBot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+bot.set_currency_resolver(
+    lambda chat_id: (users_col.find_one({"_id": chat_id}) or {}).get("currency", "INR")
+    if isinstance(chat_id, int) else "INR"
+)
 dp = Dispatcher()
 dp.update.middleware(BanCheckMiddleware())
 dp.callback_query.outer_middleware(FeatureGateMiddleware())

@@ -61,6 +61,22 @@ _EMOJI_PATTERN = re.compile(
     "|".join(re.escape(item) for item in sorted(EMOJI_IDS, key=len, reverse=True))
 ) if EMOJI_IDS else re.compile(r"(?!x)x")
 _TAG_SPLIT = re.compile(r"(<[^>]+>)")
+_INR_AMOUNT = re.compile(r"₹\s*([0-9][0-9,]*(?:\.[0-9]+)?)")
+
+
+def convert_currency(text: str, currency: str | None) -> str:
+    """Convert INR amounts in existing flows to the user's selected display currency."""
+    if currency != "USD":
+        return text
+
+    def replace(match: re.Match) -> str:
+        try:
+            inr = float(match.group(1).replace(",", ""))
+            return f"${inr / 95.0:,.2f}"
+        except ValueError:
+            return match.group(0)
+
+    return _INR_AMOUNT.sub(replace, text)
 
 
 def emoji_id(emoji: str) -> str | None:
@@ -112,39 +128,42 @@ def to_rich_html(text: str, parse_mode: Any = "HTML") -> str:
     return _premium_text("".join(chunks))
 
 
-def premium_button(button: InlineKeyboardButton) -> InlineKeyboardButton:
+def premium_button(button: InlineKeyboardButton, currency: str | None = None) -> InlineKeyboardButton:
     """Use a Premium icon on a button and deliberately remove color styling."""
-    updates: dict[str, Any] = {"style": None}
+    updates: dict[str, Any] = {
+        "style": None,
+        "text": convert_currency(button.text, currency),
+    }
     if not button.icon_custom_emoji_id:
         for symbol in sorted(EMOJI_IDS, key=len, reverse=True):
             if button.text.startswith(symbol):
                 updates["icon_custom_emoji_id"] = EMOJI_IDS[symbol]
                 cleaned = button.text[len(symbol):].lstrip()
-                updates["text"] = cleaned or button.text
+                updates["text"] = convert_currency(cleaned or button.text, currency)
                 break
     return button.model_copy(update=updates)
 
 
-def premium_markup(markup: Any) -> Any:
+def premium_markup(markup: Any, currency: str | None = None) -> Any:
     """Add Premium icons to every inline button without colored button styles."""
     if not isinstance(markup, InlineKeyboardMarkup):
         return markup
     return markup.model_copy(
         update={
             "inline_keyboard": [
-                [premium_button(button) for button in row]
+                [premium_button(button, currency) for button in row]
                 for row in markup.inline_keyboard
             ]
         }
     )
 
 
-def _upgrade_method(method: Any) -> Any:
+def _upgrade_method(method: Any, currency: str | None = None) -> Any:
     if isinstance(method, SendMessage):
         return SendRichMessage(
             chat_id=method.chat_id,
             rich_message=InputRichMessage(
-                html=to_rich_html(method.text, method.parse_mode),
+                html=to_rich_html(convert_currency(method.text, currency), method.parse_mode),
                 skip_entity_detection=False,
             ),
             business_connection_id=method.business_connection_id,
@@ -156,7 +175,7 @@ def _upgrade_method(method: Any) -> Any:
             message_effect_id=method.message_effect_id,
             suggested_post_parameters=method.suggested_post_parameters,
             reply_parameters=method.reply_parameters,
-            reply_markup=premium_markup(method.reply_markup),
+            reply_markup=premium_markup(method.reply_markup, currency),
         )
     if isinstance(method, EditMessageText):
         return method.model_copy(
@@ -165,10 +184,10 @@ def _upgrade_method(method: Any) -> Any:
                 "parse_mode": None,
                 "entities": None,
                 "rich_message": InputRichMessage(
-                    html=to_rich_html(method.text or "", method.parse_mode),
+                    html=to_rich_html(convert_currency(method.text or "", currency), method.parse_mode),
                     skip_entity_detection=False,
                 ),
-                "reply_markup": premium_markup(method.reply_markup),
+                "reply_markup": premium_markup(method.reply_markup, currency),
             }
         )
     return method
@@ -177,8 +196,20 @@ def _upgrade_method(method: Any) -> Any:
 class RichBot(Bot):
     """Aiogram Bot that transparently upgrades all normal text to Rich Messages."""
 
+    currency_resolver = None
+
+    def set_currency_resolver(self, resolver) -> None:
+        """Set a lightweight ``chat_id -> INR|USD`` preference callback."""
+        self.currency_resolver = resolver
+
     async def __call__(self, method: Any, request_timeout: int | None = None) -> Any:
-        upgraded = _upgrade_method(method)
+        currency = None
+        if self.currency_resolver and isinstance(method, (SendMessage, EditMessageText)):
+            try:
+                currency = self.currency_resolver(method.chat_id)
+            except Exception:
+                currency = None
+        upgraded = _upgrade_method(method, currency)
         try:
             return await super().__call__(upgraded, request_timeout=request_timeout)
         except TelegramBadRequest as exc:
@@ -187,7 +218,10 @@ class RichBot(Bot):
             # Keep the complete old behavior as a compatibility/error fallback.
             log.warning("Rich message rejected; using classic fallback: %s", exc)
             fallback = method.model_copy(
-                update={"reply_markup": premium_markup(method.reply_markup)}
+                update={
+                    "text": convert_currency(method.text or "", currency),
+                    "reply_markup": premium_markup(method.reply_markup, currency),
+                }
             ) if isinstance(method, (SendMessage, EditMessageText)) else method
             try:
                 return await super().__call__(fallback, request_timeout=request_timeout)
@@ -200,5 +234,8 @@ class RichBot(Bot):
                             for button in row
                         ] for row in method.reply_markup.inline_keyboard]
                     })
-                    fallback = method.model_copy(update={"reply_markup": plain})
+                    fallback = method.model_copy(update={
+                        "text": convert_currency(method.text or "", currency),
+                        "reply_markup": plain,
+                    })
                 return await super().__call__(fallback, request_timeout=request_timeout)
