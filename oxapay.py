@@ -1,21 +1,20 @@
 import requests
-import json
 import logging
 
-# Set up logging to catch errors
+from config import OXAPAY_API_KEY
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("OxaPay")
 
-# YOUR MERCHANT API KEY
-API_KEY = "MMS26B-OMISYD-TRMU3M-RR4BWJ"
+API_KEY = OXAPAY_API_KEY
 # ENDPOINTS
 CREATE_URL = "https://api.oxapay.com/v1/payment/invoice"
 STATUS_URL = "https://api.oxapay.com/v1/payment/status"
 
 def create_invoice(amount_usd: float, order_id: str):
-    """
-    Creates an invoice using the /v1/payment/invoice endpoint
-    """
+    """Create an OxaPay invoice."""
+    if not API_KEY:
+        return {"success": False, "error": "OxaPay API key is not configured"}
     payload = {
         "amount": amount_usd,
         "currency": "USD", # Input currency
@@ -36,7 +35,7 @@ def create_invoice(amount_usd: float, order_id: str):
     }
 
     try:
-        response = requests.post(CREATE_URL, data=json.dumps(payload), headers=headers, timeout=20)
+        response = requests.post(CREATE_URL, json=payload, headers=headers, timeout=20)
         res_data = response.json()
         
         # Check if the HTTP status is 200 (OK)
@@ -54,26 +53,19 @@ def create_invoice(amount_usd: float, order_id: str):
         return {"success": False, "error": str(e)}
 
 def check_invoice(track_id: str):
-    """
-    Checks status using the GET /v1/payment/{track_id} endpoint
-    """
-    # Put the track_id directly into the URL string
+    """Check an OxaPay invoice status."""
+    if not API_KEY:
+        return {"status": 500, "message": "OxaPay API key is not configured"}
     url = f"https://api.oxapay.com/v1/payment/{track_id}"
     
     headers = {
-        "merchant_api_key": API_KEY, # Ensure API_KEY is defined in your file
+        "merchant_api_key": API_KEY,
         "Content-Type": "application/json"
     }
 
     try:
-        # We must use .get() instead of .post()
         response = requests.get(url, headers=headers, timeout=20)
-        res_data = response.json()
-        
-        # This print will show up in your logs so you can see the real status
-        print(f"DEBUG: Status response for {track_id} -> {res_data}")
-        
-        return res_data
+        return response.json()
     except Exception as e:
         logger.error(f"Check Status Error: {e}")
         return {"status": 500, "message": str(e)}

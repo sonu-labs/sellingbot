@@ -9,7 +9,7 @@ import requests
 
 from config import (
     UPI_API_KEY, UPI_API_URL,
-    FAMPAY_API_KEY,
+    FAMPAY_API_KEY, FAMPAY_VERIFY_API_URL,
     BINANCE_API_KEY, BINANCE_SECRET,
 )
 
@@ -62,9 +62,6 @@ def verify_upi_invoice(order_id: str):
 
 
 # ================= FamPay (UTR / transaction-ID verification) =================
-FAMPAY_VERIFY_API_URL = "https://fampay.rulebreaker.cc/api/v1/payment/verify"
-
-
 def verify_fampay_invoice(reference: str):
     """Verify a user-submitted FamPay UTR or transaction ID.
 

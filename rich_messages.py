@@ -17,8 +17,17 @@ from typing import Any
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import EditMessageText, SendMessage, SendRichMessage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputRichMessage
+from aiogram.methods import (
+    EditMessageText, SendAnimation, SendAudio, SendDocument, SendMessage,
+    SendPhoto, SendRichMessage, SendVideo, SendVoice,
+)
+from aiogram.types import (
+    InlineKeyboardButton, InlineKeyboardMarkup, InputMediaAnimation,
+    InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo,
+    InputRichBlockAnimation, InputRichBlockAudio, InputRichBlockDocument,
+    InputRichBlockPhoto, InputRichBlockVideo, InputRichMessage, RichBlockCaption,
+    RichTextCustomEmoji,
+)
 
 log = logging.getLogger("tga.rich")
 
@@ -158,6 +167,91 @@ def premium_markup(markup: Any, currency: str | None = None) -> Any:
     )
 
 
+_MEDIA_METHODS = (SendPhoto, SendVideo, SendDocument, SendAudio, SendAnimation, SendVoice)
+
+
+def _plain_caption(text: str | None, currency: str | None) -> str | None:
+    if not text:
+        return None
+    converted = convert_currency(text, currency)
+    converted = re.sub(r"<br\s*/?>", "\n", converted, flags=re.I)
+    converted = re.sub(r"<[^>]+>", "", converted)
+    return html.unescape(converted)
+
+
+def _premium_rich_text(text: str):
+    parts = []
+    position = 0
+    for match in _EMOJI_PATTERN.finditer(text):
+        if match.start() > position:
+            parts.append(text[position:match.start()])
+        symbol = match.group(0)
+        parts.append(RichTextCustomEmoji(
+            custom_emoji_id=EMOJI_IDS[symbol], alternative_text=symbol
+        ))
+        position = match.end()
+    if position < len(text):
+        parts.append(text[position:])
+    return parts or text
+
+
+def _media_rich_message(method: Any, currency: str | None) -> InputRichMessage | None:
+    """Build an explicit native Rich Message media block for media sends."""
+    caption_text = _plain_caption(getattr(method, "caption", None), currency)
+    caption = RichBlockCaption(text=_premium_rich_text(caption_text)) if caption_text else None
+    if isinstance(method, SendPhoto):
+        media = InputMediaPhoto(media=method.photo, has_spoiler=method.has_spoiler)
+        block = InputRichBlockPhoto(photo=media, caption=caption)
+    elif isinstance(method, SendVideo):
+        media = InputMediaVideo(
+            media=method.video, thumbnail=method.thumbnail, cover=method.cover,
+            start_timestamp=method.start_timestamp, width=method.width,
+            height=method.height, duration=method.duration,
+            supports_streaming=method.supports_streaming, has_spoiler=method.has_spoiler,
+        )
+        block = InputRichBlockVideo(video=media, caption=caption)
+    elif isinstance(method, SendDocument):
+        media = InputMediaDocument(
+            media=method.document, thumbnail=method.thumbnail,
+            disable_content_type_detection=method.disable_content_type_detection,
+        )
+        block = InputRichBlockDocument(document=media, caption=caption)
+    elif isinstance(method, SendAudio):
+        media = InputMediaAudio(
+            media=method.audio, thumbnail=method.thumbnail, duration=method.duration,
+            performer=method.performer, title=method.title,
+        )
+        block = InputRichBlockAudio(audio=media, caption=caption)
+    elif isinstance(method, SendAnimation):
+        media = InputMediaAnimation(
+            media=method.animation, thumbnail=method.thumbnail, width=method.width,
+            height=method.height, duration=method.duration, has_spoiler=method.has_spoiler,
+        )
+        block = InputRichBlockAnimation(animation=media, caption=caption)
+    else:
+        # InputRichBlockVoiceNote currently accepts only remote/file-id strings,
+        # while SendVoice also accepts uploads. Keep its safe classic fallback.
+        return None
+    return InputRichMessage(blocks=[block])
+
+
+def _common_rich_send(method: Any, rich_message: InputRichMessage, currency: str | None):
+    return SendRichMessage(
+        chat_id=method.chat_id,
+        rich_message=rich_message,
+        business_connection_id=method.business_connection_id,
+        message_thread_id=method.message_thread_id,
+        direct_messages_topic_id=method.direct_messages_topic_id,
+        disable_notification=method.disable_notification,
+        protect_content=method.protect_content,
+        allow_paid_broadcast=method.allow_paid_broadcast,
+        message_effect_id=method.message_effect_id,
+        suggested_post_parameters=method.suggested_post_parameters,
+        reply_parameters=method.reply_parameters,
+        reply_markup=premium_markup(method.reply_markup, currency),
+    )
+
+
 def _upgrade_method(method: Any, currency: str | None = None) -> Any:
     if isinstance(method, SendMessage):
         return SendRichMessage(
@@ -177,6 +271,10 @@ def _upgrade_method(method: Any, currency: str | None = None) -> Any:
             reply_parameters=method.reply_parameters,
             reply_markup=premium_markup(method.reply_markup, currency),
         )
+    if isinstance(method, _MEDIA_METHODS):
+        rich_media = _media_rich_message(method, currency)
+        if rich_media is not None:
+            return _common_rich_send(method, rich_media, currency)
     if isinstance(method, EditMessageText):
         return method.model_copy(
             update={
@@ -204,7 +302,7 @@ class RichBot(Bot):
 
     async def __call__(self, method: Any, request_timeout: int | None = None) -> Any:
         currency = None
-        if self.currency_resolver and isinstance(method, (SendMessage, EditMessageText)):
+        if self.currency_resolver and isinstance(method, (SendMessage, EditMessageText, *_MEDIA_METHODS)):
             try:
                 currency = self.currency_resolver(method.chat_id)
             except Exception:
@@ -217,12 +315,12 @@ class RichBot(Bot):
                 raise
             # Keep the complete old behavior as a compatibility/error fallback.
             log.warning("Rich message rejected; using classic fallback: %s", exc)
-            fallback = method.model_copy(
-                update={
-                    "text": convert_currency(method.text or "", currency),
-                    "reply_markup": premium_markup(method.reply_markup, currency),
-                }
-            ) if isinstance(method, (SendMessage, EditMessageText)) else method
+            updates = {"reply_markup": premium_markup(method.reply_markup, currency)}
+            if isinstance(method, (SendMessage, EditMessageText)):
+                updates["text"] = convert_currency(method.text or "", currency)
+            elif isinstance(method, _MEDIA_METHODS):
+                updates["caption"] = convert_currency(method.caption or "", currency)
+            fallback = method.model_copy(update=updates)
             try:
                 return await super().__call__(fallback, request_timeout=request_timeout)
             except TelegramBadRequest:
@@ -234,8 +332,6 @@ class RichBot(Bot):
                             for button in row
                         ] for row in method.reply_markup.inline_keyboard]
                     })
-                    fallback = method.model_copy(update={
-                        "text": convert_currency(method.text or "", currency),
-                        "reply_markup": plain,
-                    })
+                    updates["reply_markup"] = plain
+                    fallback = method.model_copy(update=updates)
                 return await super().__call__(fallback, request_timeout=request_timeout)

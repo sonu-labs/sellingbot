@@ -9,7 +9,10 @@
     "API_ID": {"description": "Telegram application API ID", "required": true},
     "API_HASH": {"description": "Telegram application API hash", "required": true},
     "TEMPORASMS_API_KEY": {"description": "Temporasms provider key", "required": false},
-    "BOT_USERNAME": {"description": "Bot username without @", "value": "TGAStore1Bot", "required": false},
+    "FAMPAY_API_KEY": {"description": "FamPay Rulebreaker verification API key", "required": false},
+    "FAMPAY_VERIFY_API_URL": {"description": "FamPay verification endpoint", "value": "https://fampay.rulebreaker.cc/api/v1/payment/verify", "required": false},
+    "OXAPAY_API_KEY": {"description": "OxaPay merchant API key", "required": false},
+    "BOT_USERNAME": {"description": "Bot username without @", "value": "TGAStoreAPIBot", "required": false},
     "SUPPORT_USERNAME": {"description": "Support username without @", "value": "OfcCuteSmile", "required": false}
   },
   "buildpacks": [{"url": "heroku/python"}],

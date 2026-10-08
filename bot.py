@@ -3543,7 +3543,7 @@ async def cmd_advanced_sales(msg: Message):
         f"🌍 <b>Top Country:</b> {top_country}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"🤖 <b>Bot Status:</b> 🟢 Active\n"
-        f"👨‍💻 <b>Support:</b> @CuteSmileVip"
+        f"👨‍💻 <b>Support:</b> @{SUPPORT}"
     )
 
     await status_msg.edit_text(report, parse_mode="HTML")

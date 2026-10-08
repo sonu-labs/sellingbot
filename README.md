@@ -4,8 +4,9 @@ A production-ready Telegram marketplace bot for digital accounts, social-media s
 
 ## Highlights
 
-- **Native Telegram Rich Messages** (Bot API 10.3) with automatic classic-message fallback
-- **Premium custom emoji** loaded from the bundled `EMOJI_IDS` packs
+- **Native Telegram Rich Messages** (Bot API 10.3) for text, edits and media blocks, with automatic classic fallback
+- **Premium custom emoji** in message text, media captions and buttons, loaded from the bundled `EMOJI_IDS` packs
+- Official bot username: **@TGAStoreAPIBot**
 - English, Russian, Arabic (Saudi Arabia), Chinese and Indonesian onboarding
 - User-selectable INR (`₹`) or USD (`$`) display currency
 - Telegram and WhatsApp account marketplace, SMM reseller, product store and recharge flows
