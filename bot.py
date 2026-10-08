@@ -17,7 +17,7 @@ from aiogram.types import CopyTextButton
 from telethon.tl.functions.account import GetAuthorizationsRequest, ResetAuthorizationRequest
 from aiogram.fsm.context import FSMContext
 from datetime import datetime, timezone, timedelta
-from aiogram import Bot, Dispatcher, F
+from aiogram import Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -37,11 +37,16 @@ from recharge_flow import register_recharge_handlers
 from smm import register_smm_handlers
 from server3 import register_server3_handlers
 from mustjoin import check_join
-from config import BOT_TOKEN, ADMIN_IDS
+from config import (
+    BOT_TOKEN, ADMIN_IDS, MONGO_URI, BOT_USERNAME, SUPPORT_USERNAME,
+    UPDATES_CHANNEL, SALES_LOG_CHANNEL, ADMIN_LOG_ID, SALES_LOG_ID,
+    TEMPORASMS_API_KEY,
+)
+from rich_messages import RichBot
+from i18n import LANGUAGES, CURRENCIES, tr, format_balance, language_name
 
 # ================= MongoDB Setup =================
-MONGO_URI = os.getenv("MONGO_URI") or "mongodb+srv://AccountBot:kushwaha123@accountbot.2ga9pv7.mongodb.net/?appName=AccountBot"
-client = MongoClient(MONGO_URI)
+client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=15000)
 db = client["TGAStoreBot"]
 users_col = db["users"]
 orders_col = db["orders"]
@@ -53,17 +58,16 @@ settings_col = db["settings"]
 store_col = db["store_products"]
 s3_catalog = db["server3_catalog"]
 
-#--------- Config : don't use @
-BOTUSER = "TGAStore1Bot"
-SUPPORT = "OfcCuteSmile"
-USAGE = "twalllogs"
-OWNER = "OfcCuteSmile"
-UPDATES= "twalllogs"
-CHANNEL="TGAForu"
-SALES = "-1002254383562"
-SALESLOG = "twalllogs"
-ADMINLOG = "-1003441797589"
-TEMPORASMS_API_KEY = "704e607cc2b4e6ca76ea2fcdbea7364a4864"
+# Runtime branding/configuration (usernames are stored without @).
+BOTUSER = BOT_USERNAME
+SUPPORT = SUPPORT_USERNAME
+USAGE = SALES_LOG_CHANNEL
+OWNER = SUPPORT_USERNAME
+UPDATES = UPDATES_CHANNEL
+CHANNEL = UPDATES_CHANNEL
+SALES = SALES_LOG_ID
+SALESLOG = SALES_LOG_CHANNEL
+ADMINLOG = ADMIN_LOG_ID
 # ================= STORE DATABASE & FSM =================
 class StoreAdmin(StatesGroup):
     waiting_category = State()
@@ -83,6 +87,23 @@ class TransferBalance(StatesGroup):
 
 
 # ================= Ban Middleware =================
+class FeatureGateMiddleware(BaseMiddleware):
+    """Reject stale/deep-link callbacks when an admin disabled a service."""
+
+    async def __call__(self, handler, event, data):
+        if isinstance(event, CallbackQuery):
+            callback = event.data or ""
+            doc = settings_col.find_one({"_id": "bot_features"}) or {}
+            if callback.startswith("smm_") and not doc.get("smm_enabled", True):
+                await event.answer("Social Media Services are currently disabled.", show_alert=True)
+                return
+            whatsapp_callbacks = ("buy_wa", "buy_server3:wa")
+            if callback.startswith(whatsapp_callbacks) and not doc.get("whatsapp_enabled", True):
+                await event.answer("WhatsApp services are currently disabled.", show_alert=True)
+                return
+        return await handler(event, data)
+
+
 class BanCheckMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -103,9 +124,14 @@ class BanCheckMiddleware(BaseMiddleware):
         return await handler(event, data)
         
 # ================= Bot Setup =================
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+bot = RichBot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+bot.set_currency_resolver(
+    lambda chat_id: (users_col.find_one({"_id": chat_id}) or {}).get("currency", "INR")
+    if isinstance(chat_id, int) else "INR"
+)
 dp = Dispatcher()
-dp.update.middleware(BanCheckMiddleware()) # <--- ADD THIS LINE
+dp.update.middleware(BanCheckMiddleware())
+dp.callback_query.outer_middleware(FeatureGateMiddleware())
 
 
 # ================= FSM =================
@@ -147,6 +173,10 @@ class AdminTxnState(StatesGroup):
     
 class ServerManage(StatesGroup):
     waiting_profit_margin = State()
+
+
+class EditSellRates(StatesGroup):
+    waiting_rates = State()
 
 # ================ Helpers =================
 def get_or_create_user(user_id: int, username: str | None):
@@ -347,8 +377,11 @@ async def otp_listener(number_doc, user_id, message_id):
 
         await asyncio.sleep(1)
     except Exception as e:
-        await callback.answer(
-            user_id, "💬 No new code Received, Try sending new code first ")
+        print(f"OTP listener failed for {user_id}: {e}")
+        try:
+            await bot.send_message(user_id, "💬 No new code received. Please request a new code and try again.")
+        except Exception:
+            pass
 
     finally:
         await client.disconnect()
@@ -468,6 +501,76 @@ async def logout_bot(call: CallbackQuery):
     )
 
 # ================ START =================
+def get_feature_settings() -> dict:
+    """Return global user-menu switches, backfilling newly added options."""
+    defaults = {"smm_enabled": True, "whatsapp_enabled": True}
+    doc = settings_col.find_one({"_id": "bot_features"})
+    if not doc:
+        settings_col.insert_one({"_id": "bot_features", **defaults})
+        return defaults
+    missing = {key: value for key, value in defaults.items() if key not in doc}
+    if missing:
+        settings_col.update_one({"_id": "bot_features"}, {"$set": missing})
+        doc.update(missing)
+    return doc
+
+
+def language_keyboard(back: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=f"{flag} {name}", callback_data=f"set_lang:{code}")]
+        for code, (flag, name) in LANGUAGES.items()
+    ]
+    if back:
+        rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def currency_keyboard(user: dict | None = None, back: bool = False) -> InlineKeyboardMarkup:
+    rows = [[
+        InlineKeyboardButton(text=f"₹ INR", callback_data="set_currency:INR"),
+        InlineKeyboardButton(text=f"$ USD", callback_data="set_currency:USD"),
+    ]]
+    if back:
+        rows.append([InlineKeyboardButton(text=f"⬅️ {tr(user, 'back')}", callback_data="settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_main_menu(user_id: int, full_name: str) -> tuple[str, InlineKeyboardMarkup]:
+    user = users_col.find_one({"_id": user_id}) or {}
+    features = get_feature_settings()
+    text = tr(user, "welcome").format(
+        name=f"<a href='tg://user?id={user_id}'>{escape(full_name)}</a>",
+        user_id=user_id,
+        balance=format_balance(user),
+    )
+    rows = [[InlineKeyboardButton(text=f"🛒 {tr(user, 'buy_tg')}", callback_data="buy")]]
+    if features.get("whatsapp_enabled", True):
+        rows.append([InlineKeyboardButton(text=f"📞 {tr(user, 'buy_wa')}", callback_data="buy_wa")])
+    rows.append([
+        InlineKeyboardButton(text=f"💳 {tr(user, 'recharge')}", callback_data="recharge"),
+        InlineKeyboardButton(text=f"👤 {tr(user, 'account')}", callback_data="stats"),
+    ])
+    if features.get("smm_enabled", True):
+        rows.append([InlineKeyboardButton(text=f"🚀 {tr(user, 'smm')}", callback_data="smm_open")])
+    rows.extend([
+        [
+            InlineKeyboardButton(text=f"🏪 {tr(user, 'store')}", callback_data="store_menu"),
+            InlineKeyboardButton(text=f"📚 {tr(user, 'api_docs')}", callback_data="api_docs"),
+        ],
+        [InlineKeyboardButton(text=f"➕ {tr(user, 'more')}", callback_data="more_menu")],
+        [InlineKeyboardButton(text=f"👨‍💻 {tr(user, 'support')}", url=f"https://t.me/{SUPPORT}")],
+    ])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def show_main(target: Message, user_id: int, full_name: str, edit: bool = False):
+    text, markup = build_main_menu(user_id, full_name)
+    if edit:
+        await target.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    else:
+        await target.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
 @dp.message(Command("start"))
 async def cmd_start(m: Message):
     args = m.text.split()
@@ -568,14 +671,6 @@ async def cmd_start(m: Message):
             referred_by = int(args[1][3:])
         except:
             referred_by = None
-    if len(args) > 1 and args[1] in ("s3tg", "s3wa"):
-        category = "tg" if args[1] == "s3tg" else "wa"
-        await s3_send_countries_message(m.chat.id, category)
-        return
-    if len(args) > 1 and args[1] == "smm":
-        await smm_send_menu(m.chat.id)
-        return
-
     user = users_col.find_one({"_id": m.from_user.id})
 
     if not user:
@@ -600,8 +695,37 @@ async def cmd_start(m: Message):
         except Exception as e:
             print("Admin new-user notify error:", e)
 
+    # First-time onboarding: language, then currency. Existing users without
+    # preferences are migrated through the same one-time screen.
+    user = users_col.find_one({"_id": m.from_user.id}) or {}
+    if not user.get("language"):
+        await m.answer(
+            "<h2>Welcome to TGA Store | API</h2><p>Please choose your language.</p>",
+            reply_markup=language_keyboard(),
+        )
+        return
+    if not user.get("currency"):
+        await m.answer(tr(user, "choose_currency"), reply_markup=currency_keyboard(user))
+        return
+
     if not await check_join(bot, m):
         return
+
+    # Deep-link services are opened only after onboarding and membership checks.
+    if payload in ("s3tg", "s3wa"):
+        category = "tg" if payload == "s3tg" else "wa"
+        if category == "wa" and not get_feature_settings().get("whatsapp_enabled", True):
+            await m.answer("<h2>Service unavailable</h2><p>WhatsApp services are currently disabled.</p>")
+            return
+        await s3_send_countries_message(m.chat.id, category)
+        return
+    if payload == "smm":
+        if not get_feature_settings().get("smm_enabled", True):
+            await m.answer("<h2>Service unavailable</h2><p>Social Media Services are currently disabled.</p>")
+            return
+        await smm_send_menu(m.chat.id)
+        return
+
     # Reward the referrer only now that the new user has confirmed channel membership
     REFER_BONUS_INR = 1.0
     user = users_col.find_one({"_id": m.from_user.id})
@@ -640,41 +764,7 @@ async def cmd_start(m: Message):
     balance = f"₹{user['balance']:.2f} " if user else "₹0 "
     
 # ================= Main Start Menu =================
-    # Calculate Balance
-    balance_inr = user.get("balance", 0.0) if user else 0.0
-    balance_usdt = balance_inr / 95.0
-
-    caption = (
-        f"<blockquote> Hey, {user_mention}!</blockquote>\n"
-        f"<b>𝖶𝖾𝗅𝖼𝗈𝗆𝖾 𝖳𝗈 Account Robot- 𝖥𝖺𝗌𝗍𝖾𝗌𝗍 𝖳𝖾𝗅𝖾𝗀𝗋𝖺𝗆 𝖠𝖼𝖼𝗈𝗎𝗇𝗍 𝖲𝖾𝗅𝗅𝖾𝗋 𝖡𝗈𝗍🥂</b>\n\n"
-        f"<b>🚀 𝖤𝗇𝗃𝗈𝗒 𝖥𝖺𝗌𝗍 𝖠𝖼𝖼𝗈𝗎𝗇𝗍 𝖻𝗎𝗒𝗂𝗇𝗀 𝖤𝗑𝗉𝖾𝗋𝗂𝖾𝗇𝖼𝖾 !\n------------------------------------------------\n"
-        f"• Your ID - <code>{user_id}</code>\n"
-        f"• Your Balance - ₹{balance_inr:.2f} | ${balance_usdt:.2f}</b>"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🛒 Buy Telegram Account", callback_data="buy")
-        ],
-        [
-            InlineKeyboardButton(text="📞 Buy WhatsApp Account", callback_data="buy_wa")
-        ],
-        [
-            InlineKeyboardButton(text="💳 Recharge", callback_data="recharge"),
-            InlineKeyboardButton(text="👤 Account", callback_data="stats")
-        ],
-        [
-            InlineKeyboardButton(text="🚀 Social Media Services", callback_data="smm_open", style="success")
-        ],
-        [
-            InlineKeyboardButton(text="🏪 Store", callback_data="store_menu"),
-            InlineKeyboardButton(text="➕ More..", callback_data="more_menu")
-        ],
-        [
-            InlineKeyboardButton(text="👨‍💻 Support", url="https://t.me/OfcCuteSmile", style="danger") # Sabse niche bada button
-        ]
-    ])
-    await m.answer(caption, parse_mode="HTML", reply_markup=kb)
+    await show_main(m, m.from_user.id, m.from_user.full_name)
 
 
 
@@ -682,37 +772,30 @@ async def cmd_start(m: Message):
 # ================= More.. Menu =================
 @dp.callback_query(lambda cq: cq.data == "more_menu")
 async def more_menu(cq: CallbackQuery):
+    user = users_col.find_one({"_id": cq.from_user.id}) or {}
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="💸 Balance", callback_data="balance"),
-            InlineKeyboardButton(text="💸 Transfer Balance", callback_data="transfer_balance")
+            InlineKeyboardButton(text=f"💸 {tr(user, 'balance')}", callback_data="balance"),
+            InlineKeyboardButton(text=f"💸 {tr(user, 'transfer')}", callback_data="transfer_balance"),
+        ],
+        [InlineKeyboardButton(text=f"🎉 {tr(user, 'redeem')}", callback_data="redeem")],
+        [
+            InlineKeyboardButton(text=f"📑 {tr(user, 'history')}", callback_data="history"),
+            InlineKeyboardButton(text=f"📈 {tr(user, 'sales_log')}", url=f"https://t.me/{SALESLOG}"),
         ],
         [
-            InlineKeyboardButton(text="Redeem 🎉", callback_data="redeem")
+            InlineKeyboardButton(text=f"👤 {tr(user, 'about')}", callback_data="stats"),
+            InlineKeyboardButton(text=f"🎁 {tr(user, 'refer')}", callback_data="refer"),
         ],
         [
-            InlineKeyboardButton(text="📑 History", callback_data="history"),
-            InlineKeyboardButton(text="Sales Log", url="https://t.me/twalllogs")
+            InlineKeyboardButton(text=f"🛒 {tr(user, 'how_buy')}", url=f"https://t.me/{UPDATES}"),
+            InlineKeyboardButton(text=f"💵 {tr(user, 'how_sell')}", url=f"https://t.me/{UPDATES}"),
         ],
-        [
-            InlineKeyboardButton(text="About Account", callback_data="stats"),
-            InlineKeyboardButton(text="Refer & Earn", callback_data="refer")
-        ],
-        [
-            InlineKeyboardButton(text="How to Buy Account", url="https://t.me/tec"),
-            InlineKeyboardButton(text="How to Sell Account", url="https://t.me/tec")
-        ],
-        [
-            InlineKeyboardButton(text="How to Recharge", url="https://t.me/tec"),
-            InlineKeyboardButton(text="⬅️ Back", callback_data="back_main")
-        ]
+        [InlineKeyboardButton(text=f"💳 {tr(user, 'how_recharge')}", url=f"https://t.me/{UPDATES}")],
+        [InlineKeyboardButton(text=f"⚙️ {tr(user, 'settings')}", callback_data="settings")],
+        [InlineKeyboardButton(text=f"⬅️ {tr(user, 'back')}", callback_data="back_main")],
     ])
-
-    await cq.message.edit_text(
-        "<b>View more services and help :</b>",
-        parse_mode="HTML",
-        reply_markup=kb
-    )
+    await cq.message.edit_text(tr(user, "more_title"), reply_markup=kb)
     await cq.answer()
 
 #=============== Back Button =================
@@ -721,67 +804,100 @@ async def back_main(cq: CallbackQuery):
     if not await check_join(bot, cq):
         await cq.answer("❗ Join the channel first", show_alert=True)
         return
-    
-    user_id = cq.from_user.id
-    full_name = cq.from_user.full_name
-    safe_name = escape(full_name)
-    user_mention = f"<a href='tg://user?id={user_id}'>{safe_name}</a>"
-    
-    # Calculate Dual Currency Balance
-    user = users_col.find_one({"_id": user_id})
-    balance_inr = user.get("balance", 0.0) if user else 0.0
-    balance_usdt = balance_inr / 95.0
-    
-    caption = (
-        f"<blockquote> Hey, {user_mention}!</blockquote>\n"
-        f"<b>𝖶𝖾𝗅𝖼𝗈𝗆𝖾 𝖳𝗈 Account Robot- 𝖥𝖺𝗌𝗍𝖾𝗌𝗍 𝖳𝖾𝗅𝖾𝗀𝗋𝖺𝗆 𝖠𝖼𝖼𝗈𝗎𝗇𝗍 𝖲𝖾𝗅𝗅𝖾𝗋 𝖡𝗈𝗍🥂</b>\n\n"
-        f"<b>🚀 𝖤𝗇𝗃𝗈𝗒 𝖥𝖺𝗌𝗍 𝖠𝖼𝖼𝗈𝗎𝗇𝗍 𝖻𝗎𝗒𝗂𝗇𝗀 𝖤𝗑𝗉𝖾𝗋𝗂𝖾𝗇𝖼𝖾 !\n------------------------------------------------\n"
-        f"• Your ID - <code>{user_id}</code>\n"
-        f"• Your Balance - ₹{balance_inr:.2f} | ${balance_usdt:.2f}</b>"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🛒 Buy Telegram Account", callback_data="buy")
-        ],
-        [
-            InlineKeyboardButton(text="📞 Buy WhatsApp Account", callback_data="buy_wa")
-        ],
-        [
-            InlineKeyboardButton(text="💳 Recharge", callback_data="recharge"),
-            InlineKeyboardButton(text="👤 Account", callback_data="stats")
-        ],
-        [
-            InlineKeyboardButton(text="🚀 Social Media Services", callback_data="smm_open", style="success")
-        ],
-        [
-            InlineKeyboardButton(text="🏪 Store", callback_data="store_menu"),
-            InlineKeyboardButton(text="➕ More..", callback_data="more_menu")
-        ],
-        [
-            InlineKeyboardButton(text="👨‍💻 Support", url="https://t.me/OfcCuteSmile", style="danger") # Sabse niche bada button
-        ]
-    ])
-    
-    await cq.message.edit_text(caption, parse_mode="HTML", reply_markup=kb)
+    user = users_col.find_one({"_id": cq.from_user.id}) or {}
+    if not user.get("language"):
+        await cq.message.edit_text("<h2>Choose your language</h2>", reply_markup=language_keyboard())
+        await cq.answer()
+        return
+    if not user.get("currency"):
+        await cq.message.edit_text(tr(user, "choose_currency"), reply_markup=currency_keyboard(user))
+        await cq.answer()
+        return
+    await show_main(cq.message, cq.from_user.id, cq.from_user.full_name, edit=True)
     await cq.answer()
+
+@dp.callback_query(F.data.startswith("set_lang:"))
+async def set_language(cq: CallbackQuery):
+    language = cq.data.split(":", 1)[1]
+    if language not in LANGUAGES:
+        return await cq.answer("Invalid language", show_alert=True)
+    users_col.update_one(
+        {"_id": cq.from_user.id},
+        {"$set": {"language": language, "username": cq.from_user.username}},
+        upsert=True,
+    )
+    user = users_col.find_one({"_id": cq.from_user.id}) or {"language": language}
+    if not user.get("currency"):
+        await cq.message.edit_text(tr(user, "choose_currency"), reply_markup=currency_keyboard(user))
+    else:
+        await show_settings(cq.message, cq.from_user.id)
+    await cq.answer(tr(user, "saved"))
+
+
+@dp.callback_query(F.data.startswith("set_currency:"))
+async def set_currency(cq: CallbackQuery):
+    currency = cq.data.split(":", 1)[1]
+    if currency not in CURRENCIES:
+        return await cq.answer("Invalid currency", show_alert=True)
+    users_col.update_one({"_id": cq.from_user.id}, {"$set": {"currency": currency}}, upsert=True)
+    user = users_col.find_one({"_id": cq.from_user.id}) or {}
+    await show_main(cq.message, cq.from_user.id, cq.from_user.full_name, edit=True)
+    await cq.answer(tr(user, "saved"))
+
+
+async def show_settings(message: Message, user_id: int):
+    user = users_col.find_one({"_id": user_id}) or {}
+    language = language_name(user.get("language", "en"))
+    currency = CURRENCIES.get(user.get("currency", "INR"), CURRENCIES["INR"])[1]
+    text = tr(user, "settings_title").format(language=language, currency=currency)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🌐 {tr(user, 'language')}", callback_data="settings_language")],
+        [InlineKeyboardButton(text=f"💱 {tr(user, 'currency')}", callback_data="settings_currency")],
+        [InlineKeyboardButton(text=f"⬅️ {tr(user, 'back')}", callback_data="more_menu")],
+    ])
+    await message.edit_text(text, reply_markup=kb)
+
+
+@dp.callback_query(F.data == "settings")
+async def settings_menu(cq: CallbackQuery):
+    await show_settings(cq.message, cq.from_user.id)
+    await cq.answer()
+
+
+@dp.callback_query(F.data == "settings_language")
+async def settings_language(cq: CallbackQuery):
+    user = users_col.find_one({"_id": cq.from_user.id}) or {}
+    await cq.message.edit_text(tr(user, "choose_language"), reply_markup=language_keyboard(back=True))
+    await cq.answer()
+
+
+@dp.callback_query(F.data == "settings_currency")
+async def settings_currency(cq: CallbackQuery):
+    user = users_col.find_one({"_id": cq.from_user.id}) or {}
+    await cq.message.edit_text(tr(user, "choose_currency"), reply_markup=currency_keyboard(user, back=True))
+    await cq.answer()
+
+
+@dp.callback_query(F.data == "api_docs")
+async def api_docs(cq: CallbackQuery):
+    user = users_col.find_one({"_id": cq.from_user.id}) or {}
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"⬅️ {tr(user, 'back')}", callback_data="back_main")]
+    ])
+    await cq.message.edit_text(tr(user, "coming_soon"), reply_markup=kb)
+    await cq.answer()
+
 
 #================ Balance =================
 @dp.callback_query(F.data == "balance")
 async def show_balance(cq: CallbackQuery):
-    user = users_col.find_one({"_id": cq.from_user.id})
-    balance_inr = user.get("balance", 0.0) if user else 0.0
-    balance_usdt = balance_inr / 95.0
-    
-    await cq.answer(f"💰 Balance: ₹{balance_inr:.2f} | ${balance_usdt:.2f}", show_alert=True)
+    user = users_col.find_one({"_id": cq.from_user.id}) or {}
+    await cq.answer(f"💰 {tr(user, 'balance')}: {format_balance(user)}", show_alert=True)
 
 @dp.message(Command("balance"))
 async def cmd_balance(msg: Message):
-    user = users_col.find_one({"_id": msg.from_user.id})
-    balance_inr = user.get("balance", 0.0) if user else 0.0
-    balance_usdt = balance_inr / 95.0
-    
-    await msg.answer(f"💰 Balance: ₹{balance_inr:.2f} | ${balance_usdt:.2f}")
+    user = users_col.find_one({"_id": msg.from_user.id}) or {}
+    await msg.answer(f"<h2>{tr(user, 'balance')}</h2><p>💰 <code>{format_balance(user)}</code></p>")
 
 @dp.callback_query(F.data == "change_pass_help")
 async def change_pass_help(cq: CallbackQuery):
@@ -3273,7 +3389,7 @@ async def callback_stats(cq: CallbackQuery):
     if not user:
         user = get_or_create_user(cq.from_user.id, cq.from_user.username)
     steps_text = (
-        f"<b>◍ Account Seller Bot</b>\n––––––——–––————––––——–––•\n"
+        f"<b>◍ TGA Store | API</b>\n––––––——–––————––––——–––•\n"
         f"<blockquote><b>👤 Name: </b>{html.escape(cq.from_user.full_name)}\n"
         f"<b>💻 Username: </b>@{cq.from_user.username if cq.from_user.username else 'N/A'}\n"
         f"<b>🆔 User ID:</b> {cq.from_user.id}\n"
@@ -3427,7 +3543,7 @@ async def cmd_advanced_sales(msg: Message):
         f"🌍 <b>Top Country:</b> {top_country}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"🤖 <b>Bot Status:</b> 🟢 Active\n"
-        f"👨‍💻 <b>Support:</b> @CuteSmileVip"
+        f"👨‍💻 <b>Support:</b> @{SUPPORT}"
     )
 
     await status_msg.edit_text(report, parse_mode="HTML")
@@ -3757,25 +3873,35 @@ async def handle_user_redeem(msg: Message, state: FSMContext):
     await state.clear()
 
 @dp.message(Command("editsell"))
-async def cmd_editsell(msg: Message):
+async def cmd_editsell(msg: Message, state: FSMContext):
     if not is_admin(msg.from_user.id):
         return await msg.answer("❌ Not authorized.")
-
+    await state.set_state(EditSellRates.waiting_rates)
     await msg.answer("📋 Send the list in format:\n\n<code>USA ₹50\nIndia ₹10\nUK ₹20</code>")
 
-    @dp.message()  # Next message from admin
-    async def handle_sell_edit(m: Message):
-        sell_prices_col.delete_many({})
-        for line in m.text.splitlines():
-            try:
-                parts = line.split("₹")
-                country = parts[0].strip()
-                price = float(parts[1].strip())
-                code = "+1" if "USA" in country else "+91" if "India" in country else ""  # add more or editable
-                sell_rates_col.insert_one({"country": country, "price": price, "code": code})
-            except:
-                continue
-        await m.answer("✅ Sell rates updated.")
+
+@dp.message(EditSellRates.waiting_rates)
+async def handle_sell_edit(m: Message, state: FSMContext):
+    if not is_admin(m.from_user.id):
+        await state.clear()
+        return
+    records = []
+    for line in (m.text or "").splitlines():
+        try:
+            country, raw_price = line.rsplit("₹", 1)
+            country = country.strip()
+            price = float(raw_price.strip())
+            if country and price >= 0:
+                code = "+1" if "USA" in country else "+91" if "India" in country else ""
+                records.append({"country": country, "price": price, "code": code})
+        except (ValueError, TypeError):
+            continue
+    if not records:
+        return await m.answer("❌ No valid rates found. Use one <code>Country ₹Price</code> per line.")
+    sell_prices_col.delete_many({})
+    sell_prices_col.insert_many(records)
+    await state.clear()
+    await m.answer(f"✅ {len(records)} sell rates updated.")
 
 # ================= Admin Live Credits =================
 @dp.message(Command("livecredits"))
@@ -4528,6 +4654,115 @@ async def transfer_balance_confirm(
     # ==================================================
 
     await cq.answer()
+# ================= Professional Admin Control Center =================
+def admin_panel_markup() -> InlineKeyboardMarkup:
+    features = get_feature_settings()
+    smm = "ON ✅" if features.get("smm_enabled", True) else "OFF ❌"
+    wa = "ON ✅" if features.get("whatsapp_enabled", True) else "OFF ❌"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=f"🚀 SMM: {smm}", callback_data="admin_toggle:smm"),
+            InlineKeyboardButton(text=f"📞 WhatsApp: {wa}", callback_data="admin_toggle:whatsapp"),
+        ],
+        [
+            InlineKeyboardButton(text="🖥 Server Control", callback_data="admin_help:servers"),
+            InlineKeyboardButton(text="💳 Payments", callback_data="admin_help:payments"),
+        ],
+        [
+            InlineKeyboardButton(text="🏪 Store Control", callback_data="admin_help:store"),
+            InlineKeyboardButton(text="🌐 SMM Control", callback_data="admin_help:smm"),
+        ],
+        [
+            InlineKeyboardButton(text="👥 Users & Balance", callback_data="admin_help:users"),
+            InlineKeyboardButton(text="📦 Stock & Countries", callback_data="admin_help:stock"),
+        ],
+        [
+            InlineKeyboardButton(text="🎟 Redeem Codes", callback_data="admin_help:redeem"),
+            InlineKeyboardButton(text="📊 Reports", callback_data="admin_help:reports"),
+        ],
+        [InlineKeyboardButton(text="📣 Broadcast", callback_data="admin_help:broadcast")],
+        [InlineKeyboardButton(text="🔄 Refresh Panel", callback_data="admin_refresh")],
+    ])
+
+
+async def render_admin_panel(message: Message, edit: bool = False):
+    users = users_col.count_documents({})
+    orders = orders_col.count_documents({})
+    stock = numbers_col.count_documents({"used": {"$ne": True}})
+    text = (
+        "<h2>TGA Store | API — Admin</h2>"
+        "<blockquote>Central control center</blockquote>"
+        f"<p>👥 <b>Users:</b> <code>{users:,}</code><br>"
+        f"📦 <b>Orders:</b> <code>{orders:,}</code><br>"
+        f"📱 <b>Available stock:</b> <code>{stock:,}</code></p>"
+        "<p>Use the switches below to instantly show or hide SMM and WhatsApp "
+        "from every user's main menu. Open a section to see its management commands.</p>"
+    )
+    if edit:
+        await message.edit_text(text, reply_markup=admin_panel_markup())
+    else:
+        await message.answer(text, reply_markup=admin_panel_markup())
+
+
+@dp.message(Command("admin"))
+async def cmd_admin(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.answer("⛔ Access denied.")
+    await render_admin_panel(msg)
+
+
+@dp.callback_query(F.data == "admin_refresh")
+async def admin_refresh(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        return await cq.answer("Access denied", show_alert=True)
+    await render_admin_panel(cq.message, edit=True)
+    await cq.answer("Panel refreshed")
+
+
+@dp.callback_query(F.data.startswith("admin_toggle:"))
+async def admin_toggle_feature(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        return await cq.answer("Access denied", show_alert=True)
+    feature = cq.data.split(":", 1)[1]
+    field = {"smm": "smm_enabled", "whatsapp": "whatsapp_enabled"}.get(feature)
+    if not field:
+        return await cq.answer("Unknown switch", show_alert=True)
+    current = get_feature_settings().get(field, True)
+    settings_col.update_one(
+        {"_id": "bot_features"}, {"$set": {field: not current}}, upsert=True
+    )
+    await render_admin_panel(cq.message, edit=True)
+    await cq.answer(f"{feature.title()} {'enabled' if not current else 'disabled'}")
+
+
+ADMIN_HELP = {
+    "servers": "<b>Server controls</b><br><code>/manageserver</code> — API servers, balances, profit and maintenance",
+    "payments": "<b>Payment controls</b><br><code>/paymentsettings</code> — gateways, crypto and payment details",
+    "store": "<b>Store controls</b><br><code>/managestore</code> — enable, add, edit or remove products",
+    "smm": "<b>SMM controls</b><br><code>/smmadmin</code> — panels, platforms, services, logs and orders",
+    "users": "<b>User controls</b><br><code>/userinfo ID</code><br><code>/credit ID AMOUNT</code><br><code>/debit ID AMOUNT</code><br><code>/gban ID</code> / <code>/ungban ID</code>",
+    "stock": "<b>Stock controls</b><br><code>/add</code> · <code>/remove</code> · <code>/db</code><br><code>/addcountry</code> · <code>/removecountry</code> · <code>/editcountry</code> · <code>/setprices</code>",
+    "redeem": "<b>Redeem controls</b><br><code>/cusredeem</code> — create codes<br><code>/redeemlist</code> — list codes",
+    "reports": "<b>Reports</b><br><code>/sales</code> · <code>/topusers</code> · <code>/livecredits</code>",
+    "broadcast": "<b>Broadcast</b><br>Reply to any message with <code>/broadcast</code> to forward it to all users.",
+}
+
+
+@dp.callback_query(F.data.startswith("admin_help:"))
+async def admin_help(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        return await cq.answer("Access denied", show_alert=True)
+    section = cq.data.split(":", 1)[1]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Admin Panel", callback_data="admin_refresh")]
+    ])
+    await cq.message.edit_text(
+        f"<h2>Admin Tools</h2><p>{ADMIN_HELP.get(section, 'Unknown section')}</p>",
+        reply_markup=kb,
+    )
+    await cq.answer()
+
+
 # ================= Admin Broadcast (Forward Version - Aiogram Fix) =================
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(msg: Message):
@@ -4581,7 +4816,28 @@ s3_send_countries_message = register_server3_handlers(
 )
 # ===== Bot Runner =====
 async def main():
-    print("Bot started.")
+    from aiogram.types import BotCommand, BotCommandScopeChat
+
+    print("TGA Store | API started.")
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Open TGA Store | API"),
+        BotCommand(command="balance", description="View wallet balance"),
+        BotCommand(command="changepassword", description="Change website password"),
+    ])
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.set_my_commands([
+                BotCommand(command="admin", description="Open admin control center"),
+                BotCommand(command="start", description="Open user menu"),
+                BotCommand(command="balance", description="View wallet balance"),
+                BotCommand(command="manageserver", description="Manage API servers"),
+                BotCommand(command="paymentsettings", description="Manage payments"),
+                BotCommand(command="smmadmin", description="Manage SMM services"),
+                BotCommand(command="managestore", description="Manage store"),
+                BotCommand(command="broadcast", description="Broadcast replied message"),
+            ], scope=BotCommandScopeChat(chat_id=admin_id))
+        except Exception as exc:
+            print(f"Could not set admin commands for {admin_id}: {exc}")
     start_auto_sweeper()  # launches the UPI/FamPay background auto-verify loop
     asyncio.create_task(smm_background_task())  # launches SMM order auto-status-checker
     

@@ -1,72 +1,45 @@
+"""Mandatory-channel membership gate for TGA Store | API."""
+
+import os
 from aiogram import types
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from config import MUST_JOIN_CHANNEL
+from config import MUST_JOIN_CHANNEL, SUPPORT_USERNAME, UPDATES_CHANNEL
 
-# Private channel details
-PRIVATE_CHANNEL_ID =  -1003394213814
-PRIVATE_CHANNEL_LINK = "https://t.me/twalllogs"
-PRIVATE_CHANNEL_ID2 =  -1004437680505
+PRIVATE_CHANNEL_ID = int(MUST_JOIN_CHANNEL)
+SECOND_CHANNEL_ID = int(os.getenv("MUST_JOIN_CHANNEL_2", "-1004437680505"))
+PRIVATE_CHANNEL_LINK = os.getenv("MUST_JOIN_LINK", "https://t.me/twalllogs")
 
-BOTUSER = "TGAStoreBot"
-# Welcome text with HTML formatting
-WELCOME_TEXT = ("❌ 𝖸𝗈𝗎 𝗆𝗎𝗌𝗍 𝗌𝗎𝖻𝗌𝖼𝗋𝗂𝖻𝖾 𝗍𝗈 𝗍𝗁𝖾 𝗈𝖿𝖿𝗂𝖼𝗂𝖺𝗅 𝖻𝗈𝗍 𝖼𝗁𝖺𝗇𝗇𝖾𝗅 𝗍𝗈 𝗎𝗌𝖾 𝗍𝗁𝖾 𝖻𝗈𝗍...\n\n<blockquote>- <b>𝖢𝗁𝖺𝗇𝗇𝖾𝗅</b> - @twalllogs</blockquote>\n\n<b>• Press Verify Button below to check</b>")
+WELCOME_TEXT = (
+    "<h2>TGA Store | API</h2>"
+    "<blockquote>Membership required</blockquote>"
+    "<p>Please join our official channels to use the bot, then press "
+    "<b>Verify Join</b>.</p>"
+)
 
 
-
-async def check_join(client, message: types.Message):
-    """
-    Check if the user has joined both required channels.
-    If not, send the join message and return False.
-    """
+async def check_join(client, event) -> bool:
+    """Check both required channels for a Message or CallbackQuery."""
+    user_id = event.from_user.id
     try:
-        # Public channel check
-        member1 = await client.get_chat_member(PRIVATE_CHANNEL_ID2, message.from_user.id)
-
-        # Private channel check
-        member2 = await client.get_chat_member(PRIVATE_CHANNEL_ID, message.from_user.id)
-
-        if (member1.status in ["left", "kicked"]) or (member2.status in ["left", "kicked"]):
-            await send_join_message(message)
-            return False
-
-        return True
+        member1 = await client.get_chat_member(SECOND_CHANNEL_ID, user_id)
+        member2 = await client.get_chat_member(PRIVATE_CHANNEL_ID, user_id)
+        if member1.status not in {"left", "kicked"} and member2.status not in {"left", "kicked"}:
+            return True
     except Exception:
-        await send_join_message(message)
-        return False
+        # Missing bot permissions and unavailable chats are treated as not joined.
+        pass
+    await send_join_message(event.message if isinstance(event, types.CallbackQuery) else event)
+    return False
 
 
 async def send_join_message(message: types.Message):
-    """
-    Send a message asking the user to join the required channels,
-    with inline buttons for both channels in one row, a Developer button, and Verify below.
-    """
     kb = InlineKeyboardBuilder()
-
-    # First row: Updates & Support channels
     kb.row(
-        types.InlineKeyboardButton(text="📢 𝖴𝗉𝖽𝖺𝗍𝖾𝗌", url=f"https://t.me/tgaforu"),
-        types.InlineKeyboardButton(text="💌 𝖲𝗎𝗉𝗉𝗈𝗋𝗍", url=PRIVATE_CHANNEL_LINK)
+        types.InlineKeyboardButton(text="📢 Updates", url=f"https://t.me/{UPDATES_CHANNEL}"),
+        types.InlineKeyboardButton(text="💌 Community", url=PRIVATE_CHANNEL_LINK),
     )
-    
-    # Second row: Developer channel
     kb.row(
-        types.InlineKeyboardButton(text="👨‍💻 𝖣𝖾𝗏𝖾𝗅𝗈𝗉𝖾𝗋", url="https://t.me/TechnoWorldOfficial")
+        types.InlineKeyboardButton(text="👨‍💻 Support", url=f"https://t.me/{SUPPORT_USERNAME}")
     )
-    
-    # Third row: Verify Join
-    kb.row(
-         types.InlineKeyboardButton(text="Verify Join ☑️", callback_data="back_main")
-    )
-
-    # Note: Don't forget to send the message with this markup!
-    # await message.answer("Please join our channels:", reply_markup=kb.as_markup())
-
-        
-
-    
-
-    await message.answer(
-        WELCOME_TEXT,
-        reply_markup=kb.as_markup(),
-        parse_mode="HTML"
-    )
+    kb.row(types.InlineKeyboardButton(text="✅ Verify Join", callback_data="back_main"))
+    await message.answer(WELCOME_TEXT, reply_markup=kb.as_markup(), parse_mode="HTML")

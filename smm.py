@@ -37,7 +37,8 @@ logger = logging.getLogger("smm")
 # First-run seed only. Live panels already saved in Mongo are not touched.
 DEFAULT_PANEL_URL = os.getenv("SMM_PANEL_URL", "https://cheapestsmmpanels.com/api/v2")
 DEFAULT_PANEL_KEY = os.getenv("SMM_PANEL_KEY", "")
-BOT_USERNAME = os.getenv("SMM_BOT_USERNAME", "TGAStore1Bot")
+BOT_USERNAME = os.getenv("SMM_BOT_USERNAME", os.getenv("BOT_USERNAME", "TGAStoreAPIBot")).lstrip("@")
+UPDATES_CHANNEL = os.getenv("UPDATES_CHANNEL", "TGAForu").lstrip("@")
 
 CHECK_EVERY_SECONDS = 60
 NOTIFY_BACKFILL_HOURS = 72
@@ -1165,7 +1166,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                 f"➕ <b>Quantity:</b> {qty}\n"
                 f"➕ <b>Price:</b> ₹{price:.2f}\n"
                 f"➕ <b>Link:</b> {h(public_link_label(platform.get('name')))}\n\n"
-                f"<b>• @{BOT_USERNAME} || @TGAForu</b>"
+                f"<b>• @{BOT_USERNAME} || @{UPDATES_CHANNEL}</b>"
             )
         finally:
             _placing_users.discard(uid)
