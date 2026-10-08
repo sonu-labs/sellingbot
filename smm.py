@@ -324,6 +324,23 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         except (TypeError, ValueError):
             return 0.0
 
+    def get_user_discount(uid: int) -> float:
+        if not uid:
+            return 0.0
+        user = users_col.find_one({"_id": uid}) or {}
+        try:
+            pct = float(user.get("discount_percent", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        return max(0.0, min(100.0, pct))
+
+    def get_service_rate_1k(svc: dict, uid: int = None) -> float:
+        base = float(svc.get("price_per_1000", 0.0) or 0.0)
+        pct = get_user_discount(uid)
+        if pct <= 0:
+            return round(base, 2)
+        return round(base * (1.0 - pct / 100.0), 2)
+
     def get_panel_for_service(svc: dict):
         pid = svc.get("panel_id") if svc else None
         if pid:
@@ -456,11 +473,11 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
     def notification_text(order, norm: str, refunded_now: bool) -> str:
         emoji = status_emoji(STATUS_TEXT.get(norm, norm))
         title = {
-            "completed": "Order completed",
-            "partial": "Order partial",
-            "canceled": "Order canceled — refunded",
-            "failed": "Order failed — refunded",
-        }.get(norm, "Order update")
+            "completed": "Order Completed",
+            "partial": "Order Partial",
+            "canceled": "Order Canceled — Refunded",
+            "failed": "Order Failed — Refunded",
+        }.get(norm, "Order Update")
         refund_line = ""
         if norm in REFUND_NORMS:
             if refunded_now or order.get("refunded"):
@@ -468,7 +485,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             else:
                 refund_line = "💸 <b>Refund:</b> not applied — contact support"
         return (
-            f"{emoji} <b>{title}</b>\n\n"
+            f"<h2>{emoji} {title}</h2>"
             + card(
                 f"🎯 <b>Service:</b> {h(order.get('service_name'))}",
                 f"🚀 <b>Platform:</b> {h(order.get('platform_emoji') or '📱')} {h(order.get('platform_name'))}",
@@ -477,7 +494,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                 f"🆔 <b>Order ID:</b> <code>{h(order['_id'])}</code>",
                 refund_line,
             )
-            + f"\n\n<blockquote>ℹ️ <i>{h(explain_status(norm))}</i></blockquote>"
+            + f"<p>ℹ️ <i>{h(explain_status(norm))}</i></p>"
         )
 
     async def maybe_notify(order, norm: str, refunded_now: bool) -> bool:
@@ -558,7 +575,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         note = extra_note or explain_status(norm)
         refunded = "Yes" if order.get("refunded") else "No"
         return (
-            f"{status_emoji(pretty)} <b>Order status</b>\n\n"
+            f"<h2>{status_emoji(pretty)} Order Status</h2>"
             + card(
                 f"🎯 <b>Service:</b> {h(order.get('service_name'))}",
                 f"🚀 <b>Platform:</b> {h(order.get('platform_emoji') or '📱')} {h(order.get('platform_name'))}",
@@ -568,13 +585,12 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                 f"🏁 <b>Start:</b> <code>{h(order.get('start_count'))}</code>    ⏳ <b>Remains:</b> <code>{h(order.get('remains'))}</code>",
                 f"💸 <b>Refunded:</b> {refunded}",
             )
-            + "\n\n"
             + card(
                 f"🆔 <b>Order ID:</b> <code>{h(order['_id'])}</code>",
                 f"🕒 <b>Placed:</b> <i>{h(placed)}</i>",
                 f"🔗 <b>Link:</b> {link_html(order.get('link') or '')}",
             )
-            + f"\n\n<blockquote>ℹ️ <i>{h(note)}</i></blockquote>"
+            + f"<p>ℹ️ <i>{h(note)}</i></p>"
         )
 
     def status_keyboard(order_id):
@@ -585,7 +601,10 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         return kb.as_markup()
 
     def close_row(kb: InlineKeyboardBuilder):
-        kb.row(InlineKeyboardButton(text="❌ Close", callback_data="delete_msg"))
+        kb.row(
+            InlineKeyboardButton(text="🔙 Back", callback_data="back_main"),
+            InlineKeyboardButton(text="❌ Close", callback_data="delete_msg"),
+        )
 
     def build_smm_menu_text_and_kb(user_id: int):
         balance = get_balance_inr(user_id)
@@ -602,29 +621,29 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         })
         if not smm_enabled():
             text = (
-                "🌐 <b>Social Media Services</b>\n\n"
+                "<h2>🌐 Social Media Services</h2>"
                 + card(
-                    "🚧 <b>Ordering is paused.</b> Old orders are safe.",
+                    "🚧 <b>Ordering is paused.</b> Existing orders are safe.",
                     f"👤 <b>User ID:</b> <code>{h(user_id)}</code>",
                     f"💰 <b>Balance:</b> <code>{h(inr(balance))}</code>",
                     f"📦 <b>Open orders:</b> <code>{open_orders}</code>",
                 )
-                + "\n\n<i>Use Status or History below.</i>"
+                + "<p><i>Use Status or History below.</i></p>"
             )
         else:
             platforms = list(smm_platforms.find({}))
             text = (
-                "🌐 <b>Social Media Services</b>\n\n"
+                "<h2>🌐 Social Media Services</h2>"
                 + card(
-                    "✨ Fast delivery · you are charged only after confirm",
-                    "👇 Choose a platform to start",
+                    "✨ Fast delivery · you are charged only after confirmation",
+                    "👇 Choose a platform below to start",
                     f"👤 <b>User ID:</b> <code>{h(user_id)}</code>",
                     f"💰 <b>Balance:</b> <code>{h(inr(balance))}</code>",
                     f"📦 <b>Open orders:</b> <code>{open_orders}</code>",
                 )
             )
             if not platforms:
-                text += "\n\n<blockquote>😔 <i>No platforms yet. Please try again later.</i></blockquote>"
+                text += "<p>😔 <i>No platforms available yet. Please try again later.</i></p>"
             else:
                 for platform in platforms:
                     kb.button(
@@ -785,21 +804,23 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         title = f"{platform.get('emoji', '📱')} {platform['name']}"
         if not services:
             text = (
-                f"<b>{h(title)}</b>\n\n"
+                f"<h2>{h(title)}</h2>"
                 + card("😔 <i>No services on this platform yet. Try another one.</i>")
             )
         else:
-            text = (
-                f"<b>{h(title)}</b>\n\n"
-                + card(
-                    "👇 Pick a service. Rate is <b>per 1,000</b>.",
-                    "Nothing is charged until you confirm.",
-                    f"📦 <b>Available:</b> <code>{len(services)}</code>",
-                )
-            )
+            disc = get_user_discount(cq.from_user.id)
+            card_lines = [
+                "👇 Pick a service below. Rate is <b>per 1,000</b>.",
+                "Nothing is charged until you confirm.",
+                f"📦 <b>Available Services:</b> <code>{len(services)}</code>",
+            ]
+            if disc > 0:
+                card_lines.append(f"🏷️ <b>VIP Discount Active:</b> <code>{disc:g}% OFF</code>")
+            text = f"<h2>{h(title)}</h2>" + card(*card_lines)
             for svc in services:
+                rate_1k = get_service_rate_1k(svc, cq.from_user.id)
                 kb.button(
-                    text=button_label(f"{svc['name']} — ₹{float(svc['price_per_1000']):.2f}/1k"),
+                    text=button_label(f"{svc['name']} — ₹{rate_1k:.2f}/1k"),
                     callback_data=f"smm_svc:{svc['_id']}",
                 )
             kb.adjust(1)
@@ -807,17 +828,22 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         await edit_html(cq.message, text, kb.as_markup())
         await cq.answer()
 
-    def service_prompt(svc, balance: float) -> str:
-        sample = float(svc["price_per_1000"]) / 1000 * int(svc["min"])
+    def service_prompt(svc, balance: float, uid: int = None) -> str:
+        rate_1k = get_service_rate_1k(svc, uid)
+        disc = get_user_discount(uid)
+        sample = rate_1k / 1000 * int(svc["min"])
+        lines = [
+            f"💰 <b>Rate:</b> <code>{h(inr(rate_1k))}</code> <i>per 1,000</i>",
+            f"📉 <b>Min:</b> <code>{h(qty_fmt(svc['min']))}</code>    📈 <b>Max:</b> <code>{h(qty_fmt(svc['max']))}</code>",
+            f"💳 <b>Balance:</b> <code>{h(inr(balance))}</code>",
+            f"💡 <i>{h(qty_fmt(svc['min']))} = {h(inr(sample))}</i>",
+        ]
+        if disc > 0:
+            lines.append(f"🏷️ <b>VIP Discount:</b> <code>{disc:g}% OFF</code>")
         return (
-            f"🎯 <b>{h(svc['name'])}</b>\n\n"
-            + card(
-                f"💰 <b>Rate:</b> <code>{h(inr(svc['price_per_1000']))}</code> <i>per 1,000</i>",
-                f"📉 <b>Min:</b> <code>{h(qty_fmt(svc['min']))}</code>    📈 <b>Max:</b> <code>{h(qty_fmt(svc['max']))}</code>",
-                f"💳 <b>Balance:</b> <code>{h(inr(balance))}</code>",
-                f"💡 <i>{h(qty_fmt(svc['min']))} = {h(inr(sample))}</i>",
-            )
-            + "\n\n🔢 <b>Choose a quantity</b>\n<i>Tap a button, or Custom and type a number.</i>"
+            f"<h2>🎯 {h(svc['name'])}</h2>"
+            + card(*lines)
+            + "<p>🔢 <b>Choose a quantity:</b> <i>Tap a preset button, or tap Custom and type a number.</i></p>"
         )
 
     @dp.callback_query(F.data.startswith("smm_svc:"))
@@ -839,15 +865,15 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         kb.button(text="✏️ Custom", callback_data="smm_qcustom")
         kb.adjust(3)
         kb.row(InlineKeyboardButton(text="❌ Cancel", callback_data="smm_open"))
-        await edit_html(cq.message, service_prompt(svc, get_balance_inr(cq.from_user.id)), kb.as_markup())
+        await edit_html(cq.message, service_prompt(svc, get_balance_inr(cq.from_user.id), cq.from_user.id), kb.as_markup())
         await cq.answer()
 
-    async def ask_for_link(target, state: FSMContext, qty: int, edit: bool):
+    async def ask_for_link(target, state: FSMContext, qty: int, edit: bool, uid: int = None):
         data = await state.get_data()
         svc = smm_services.find_one({"_id": ObjectId(data["service_id"])})
         if not svc:
             await state.clear()
-            text = "<b>❌ Service removed</b>\n\n<blockquote><i>This service is no longer available. Start again from the menu.</i></blockquote>"
+            text = "<h2>❌ Service Removed</h2><blockquote><i>This service is no longer available. Start again from the menu.</i></blockquote>"
             if edit:
                 await edit_html(target, text)
             else:
@@ -855,29 +881,31 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             return
         if qty < int(svc["min"]) or qty > int(svc["max"]):
             warn = (
-                "❌ <b>Quantity out of range</b>\n\n"
+                "<h2>❌ Quantity Out of Range</h2>"
                 + card(
                     f"📉 <b>Min:</b> <code>{h(qty_fmt(svc['min']))}</code>    📈 <b>Max:</b> <code>{h(qty_fmt(svc['max']))}</code>",
                     f"🔢 <b>You sent:</b> <code>{h(qty_fmt(qty))}</code>",
                 )
-                + "\n\n<i>Send a number inside that range.</i>"
+                + "<p><i>Send a number inside that range.</i></p>"
             )
             if edit:
                 await edit_html(target, warn)
             else:
                 await target.answer(warn, parse_mode="HTML")
             return
-        price = round((float(svc["price_per_1000"]) / 1000) * qty, 2)
+        user_id = uid or (target.chat.id if hasattr(target, "chat") else getattr(target.from_user, "id", None))
+        rate_1k = get_service_rate_1k(svc, user_id)
+        price = round((rate_1k / 1000) * qty, 2)
         await state.update_data(quantity=qty, price=price)
         await state.set_state(SMMUser.waiting_link)
         text = (
-            "🔗 <b>Send the public link</b>\n\n"
+            "<h2>🔗 Send the Public Link</h2>"
             + card(
                 f"🎯 <b>Service:</b> {h(svc['name'])}",
                 f"🔢 <b>Quantity:</b> <code>{h(qty_fmt(qty))}</code>",
                 f"💰 <b>Price:</b> <code>{h(inr(price))}</code>",
             )
-            + "\n\n<blockquote>📌 <i>Paste a public http(s) or t.me link. Never send a password.</i></blockquote>"
+            + "<p>📌 <i>Paste a public http(s) or t.me link. Never send a password.</i></p>"
         )
         kb = InlineKeyboardBuilder()
         kb.button(text="❌ Cancel", callback_data="smm_open")
@@ -895,7 +923,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             qty = int(cq.data.split(":", 1)[1])
         except ValueError:
             return await cq.answer("Invalid quantity.", show_alert=True)
-        await ask_for_link(cq.message, state, qty, edit=True)
+        await ask_for_link(cq.message, state, qty, edit=True, uid=cq.from_user.id)
         await cq.answer()
 
     @dp.callback_query(F.data == "smm_qcustom")
@@ -908,7 +936,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         kb.button(text="❌ Cancel", callback_data="smm_open")
         await edit_html(
             cq.message,
-            "✏️ <b>Custom quantity</b>\n\n"
+            "<h2>✏️ Custom Quantity</h2>"
             + card("🔢 <i>Send digits only, for example <b>1000</b>. No commas or text.</i>"),
             kb.as_markup(),
         )
@@ -923,10 +951,10 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
     async def smm_qty_received(msg: Message, state: FSMContext):
         if not msg.text or not msg.text.strip().isdigit():
             return await msg.answer(
-                "❌ <b>A number is required</b>\n\n<blockquote>🔢 <i>Send digits only, for example <b>500</b>.</i></blockquote>",
+                "<h2>❌ Number Required</h2><blockquote>🔢 <i>Send digits only, for example <b>500</b>.</i></blockquote>",
                 parse_mode="HTML",
             )
-        await ask_for_link(msg, state, int(msg.text.strip()), edit=False)
+        await ask_for_link(msg, state, int(msg.text.strip()), edit=False, uid=msg.from_user.id)
 
     @dp.message(SMMUser.waiting_link, F.text.startswith("/"))
     async def smm_link_command(msg: Message, state: FSMContext):
@@ -938,7 +966,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         link = normalize_link(msg.text or "")
         if not link:
             return await msg.answer(
-                "❌ <b>Invalid link</b>\n\n"
+                "<h2>❌ Invalid Link</h2>"
                 "<blockquote>🔗 <i>Start with http://, https://, or t.me/. No spaces.</i></blockquote>",
                 parse_mode="HTML",
             )
@@ -949,13 +977,14 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             svc = None
         if not svc:
             await state.clear()
-            return await msg.answer("<b>❌ Service removed.</b> Start again from the menu.", parse_mode="HTML")
+            return await msg.answer("<h2>❌ Service Removed</h2><p>Start again from the menu.</p>", parse_mode="HTML")
         platform = smm_platforms.find_one({"_id": svc["platform_id"]}) or {"name": "Unknown", "emoji": "📱"}
         qty = int(data["quantity"])
         if qty < int(svc["min"]) or qty > int(svc["max"]):
             await state.clear()
-            return await msg.answer("<b>❌ That quantity is no longer allowed.</b> Open the service again.", parse_mode="HTML")
-        price = round((float(svc["price_per_1000"]) / 1000) * qty, 2)
+            return await msg.answer("<h2>❌ Invalid Quantity</h2><p>Open the service again.</p>", parse_mode="HTML")
+        rate_1k = get_service_rate_1k(svc, msg.from_user.id)
+        price = round((rate_1k / 1000) * qty, 2)
         balance = get_balance_inr(msg.from_user.id)
         await state.update_data(link=link, price=price, quantity=qty)
         await state.set_state(None)
@@ -966,17 +995,17 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             else f"⚠️ <b>Short by:</b> <code>{h(inr(shortfall))}</code>"
         )
         text = (
-            "🧾 <b>Confirm this order</b>\n\n"
+            "<h2>🧾 Confirm This Order</h2>"
             + card(
                 f"🚀 <b>Platform:</b> {h(platform.get('emoji', '📱'))} {h(platform.get('name'))}",
                 f"🎯 <b>Service:</b> {h(svc['name'])}",
                 f"🔢 <b>Quantity:</b> <code>{h(qty_fmt(qty))}</code>",
-                f"💰 <b>Rate:</b> <code>{h(inr(svc['price_per_1000']))}</code> <i>/ 1,000</i>",
+                f"💰 <b>Rate:</b> <code>{h(inr(rate_1k))}</code> <i>/ 1,000</i>",
                 f"💵 <b>Total:</b> <code>{h(inr(price))}</code>",
                 money_line,
                 f"🔗 <b>Link:</b> {link_html(link)}",
             )
-            + "\n\n<blockquote>ℹ️ <i>Confirm charges your balance. Cancel or fail is refunded automatically.</i></blockquote>"
+            + "<p>ℹ️ <i>Confirm charges your balance. Canceled or failed orders are refunded automatically.</i></p>"
         )
         kb = InlineKeyboardBuilder()
         kb.row(
@@ -1005,20 +1034,21 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             svc = smm_services.find_one({"_id": ObjectId(data["service_id"])})
             if not svc:
                 await state.clear()
-                return await edit_html(cq.message, "<b>❌ Service no longer available.</b>")
+                return await edit_html(cq.message, "<h2>❌ Service No Longer Available</h2>")
             platform = smm_platforms.find_one({"_id": svc["platform_id"]}) or {"name": "Unknown", "emoji": "📱"}
             panel = get_panel_for_service(svc)
             qty = int(data["quantity"])
             link = normalize_link(data.get("link") or "")
             if not link or qty < int(svc["min"]) or qty > int(svc["max"]):
                 await state.clear()
-                return await edit_html(cq.message, "<b>❌ Order details expired or invalid.</b> Start again from the menu.")
-            price = round((float(svc["price_per_1000"]) / 1000) * qty, 2)
+                return await edit_html(cq.message, "<h2>❌ Order Details Expired</h2><p>Start again from the menu.</p>")
+            rate_1k = get_service_rate_1k(svc, uid)
+            price = round((rate_1k / 1000) * qty, 2)
             if not panel:
                 await state.clear()
                 return await edit_html(
                     cq.message,
-                    "<b>❌ No panel configured</b>\n\n<blockquote><i>This service has no provider panel behind it. Please contact an admin.</i></blockquote>",
+                    "<h2>❌ No Panel Configured</h2><blockquote><i>This service has no provider panel behind it. Please contact an admin.</i></blockquote>",
                 )
 
             balance = get_balance_inr(uid)
@@ -1030,19 +1060,19 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                 kb.adjust(1)
                 return await edit_html(
                     cq.message,
-                    "❌ <b>Insufficient balance</b>\n\n"
+                    "<h2>❌ Insufficient Balance</h2>"
                     + card(
                         f"💰 <b>Required:</b> <code>{h(inr(price))}</code>",
                         f"💳 <b>Available:</b> <code>{h(inr(balance))}</code>",
                         f"⚠️ <b>Short by:</b> <code>{h(inr(price - balance))}</code>",
                     )
-                    + "\n\n<i>Nothing has been charged. Recharge, then order again.</i>",
+                    + "<p><i>Nothing has been charged. Recharge, then order again.</i></p>",
                     kb.as_markup(),
                 )
 
             await edit_html(
                 cq.message,
-                "<b>⏳ Placing your order</b>\n\n<blockquote><i>Sending the request to the provider. Do not tap the button again.</i></blockquote>",
+                "<h2>⏳ Placing Your Order</h2><blockquote><i>Sending the request to the provider. Do not tap the button again.</i></blockquote>",
             )
             success, resp, raw = await smm_api_call(
                 panel, "add", service=svc["provider_service_id"], link=link, quantity=qty
@@ -1063,7 +1093,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                 kb.button(text="🔙 Back", callback_data="smm_open")
                 return await edit_html(
                     cq.message,
-                    "<b>❌ Order not placed</b>\n\n"
+                    "<h2>❌ Order Not Placed</h2>"
                     "<blockquote><i>The provider did not accept the order. Your balance was not charged. "
                     "Try again in a moment, or contact support with this time.</i></blockquote>",
                     kb.as_markup(),
@@ -1091,7 +1121,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                 kb.adjust(1)
                 return await edit_html(
                     cq.message,
-                    "<b>❌ Insufficient balance</b>\n\n"
+                    "<h2>❌ Insufficient Balance</h2>"
                     "<blockquote><i>Another order used the balance first. A cancel was attempted on the provider order.</i></blockquote>",
                     kb.as_markup(),
                 )
@@ -1129,12 +1159,12 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                     f"👤 <code>{h(uid)}</code>\n🆔 provider <code>{h(provider_order_id)}</code>\n<i>{h(exc)}</i>"
                 )
                 await state.clear()
-                return await edit_html(cq.message, "<b>❌ Could not save the order.</b> Balance restored. Contact support.")
+                return await edit_html(cq.message, "<h2>❌ Could Not Save Order</h2><p>Balance restored. Contact support.</p>")
 
             order_doc["_id"] = result.inserted_id
             await state.clear()
             text = (
-                "✅ <b>Order placed</b>\n\n"
+                "<h2>✅ Order Placed</h2>"
                 + card(
                     f"🆔 <b>Order ID:</b> <code>{h(result.inserted_id)}</code>",
                     f"🎯 <b>Service:</b> {h(svc['name'])}",
@@ -1143,7 +1173,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                     f"💳 <b>Balance left:</b> <code>{h(inr(new_balance))}</code>",
                     f"🔗 <b>Link:</b> {link_html(link)}",
                 )
-                + "\n\n<blockquote>ℹ️ <i>Checked about every minute. You get a message when it completes. Canceled orders are refunded.</i></blockquote>"
+                + "<p>ℹ️ <i>Checked about every minute. You get a message when it completes. Canceled orders are refunded.</i></p>"
             )
             await edit_html(cq.message, text, status_keyboard(result.inserted_id))
             await log_admin(
@@ -1158,15 +1188,16 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                 f"🔗 <code>{h(link)}</code>",
                 raw,
             )
-            # Channel log stays in the old layout. Only the link field changes.
             await log_public(
-                "<pre>✅ New SMM Order Placed Successfully</pre>\n\n"
-                f"➖ <b>Platform:</b> {h(platform.get('name'))}\n"
-                f"➖ <b>Service:</b> {h(svc.get('name'))}\n\n"
-                f"➕ <b>Quantity:</b> {qty}\n"
-                f"➕ <b>Price:</b> ₹{price:.2f}\n"
-                f"➕ <b>Link:</b> {h(public_link_label(platform.get('name')))}\n\n"
-                f"<b>• @{BOT_USERNAME} || @{UPDATES_CHANNEL}</b>"
+                "<h2>✅ New SMM Order Placed</h2>"
+                f"<blockquote>"
+                f"🚀 <b>Platform:</b> {h(platform.get('name'))}\n"
+                f"🎯 <b>Service:</b> {h(svc.get('name'))}\n"
+                f"🔢 <b>Quantity:</b> <code>{qty}</code>\n"
+                f"💵 <b>Price:</b> <code>₹{price:.2f}</code>\n"
+                f"🔗 <b>Link:</b> {h(public_link_label(platform.get('name')))}"
+                f"</blockquote>"
+                f"<p><b>• @{BOT_USERNAME} || @{UPDATES_CHANNEL}</b></p>"
             )
         finally:
             _placing_users.discard(uid)
@@ -1189,13 +1220,13 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         )
         if not success or not isinstance(resp, dict):
             text = (
-                "❌ <b>Live status unavailable</b>\n\n"
+                "<h2>❌ Live Status Unavailable</h2>"
                 + card(
                     "📡 <i>The provider did not respond. Your balance is safe.</i>",
                     f"📊 <b>Last status:</b> {h(order.get('status'))}",
                     f"🆔 <b>Order ID:</b> <code>{h(order['_id'])}</code>",
                 )
-                + "\n\n<i>Tap Refresh in a minute.</i>"
+                + "<p><i>Tap Refresh in a minute.</i></p>"
             )
             kb = status_keyboard(order["_id"])
             if edit:
@@ -1226,7 +1257,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         kb.button(text="🔙 Back", callback_data="smm_open")
         await edit_html(
             cq.message,
-            "📊 <b>Check order status</b>\n\n"
+            "<h2>📊 Check Order Status</h2>"
             + card("🆔 <i>Paste the order ID from your receipt. Tap the code to copy it.</i>"),
             kb.as_markup(),
         )
@@ -1246,7 +1277,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             order = None
         if not order:
             return await msg.answer(
-                "❌ <b>Order not found</b>\n\n<blockquote>🆔 <i>Wrong ID, or this order is not on your account. Copy it from History.</i></blockquote>",
+                "<h2>❌ Order Not Found</h2><blockquote>🆔 <i>Wrong ID, or this order is not on your account. Copy it from History.</i></blockquote>",
                 parse_mode="HTML",
             )
         await show_live_status(msg, order, edit=False, notify_user=False, actor_id=msg.from_user.id)
@@ -1275,10 +1306,10 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             kb.button(text="🔙 Back", callback_data="smm_open")
             return await edit_html(
                 cq.message,
-                "📜 <b>Order history</b>\n\n<blockquote>😔 <i>No orders yet. Pick a platform to place the first one.</i></blockquote>",
+                "<h2>📜 Order History</h2><blockquote>😔 <i>No orders yet. Pick a platform to place the first one.</i></blockquote>",
                 kb.as_markup(),
             )
-        lines = ["📜 <b>Your last orders</b>"]
+        lines = ["<h2>📜 Your Recent SMM Orders</h2>"]
         for order in orders:
             when = order.get("created_at")
             date_str = when.strftime("%d %b, %H:%M") if isinstance(when, datetime) else "—"
@@ -1296,7 +1327,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             )
         kb.adjust(1)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smm_open"))
-        await edit_html(cq.message, "\n\n".join(lines), kb.as_markup())
+        await edit_html(cq.message, "".join(lines), kb.as_markup())
         await cq.answer()
 
     # ============================================================
@@ -1304,7 +1335,6 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
     # ============================================================
 
     async def smmadmin_menu(msg: Message, edit: bool = False):
-        # Callers already checked the admin. Do not use chat.id — in groups that is not the admin.
         cfg = get_config()
         pub_status = "🟢 ON" if cfg.get("public_log_enabled", True) else "🔴 OFF"
         svc_status = "🟢 ON" if cfg.get("smm_enabled", True) else "🔴 OFF"
@@ -1312,22 +1342,33 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         checker_line = age_label(last_run) if last_run else "not running"
         stale = (not last_run) or (datetime.utcnow() - last_run > timedelta(minutes=5))
         kb = InlineKeyboardBuilder()
-        kb.button(text="➕ Add Platform", callback_data="smma_addplat")
-        kb.button(text="📂 Manage Platforms", callback_data="smma_listplat")
-        kb.button(text="🏢 Manage Panels", callback_data="smma_listpanels")
-        kb.button(text="➕ Add Panel", callback_data="smma_addpanel")
-        kb.button(text=f"📢 Public Log: {pub_status}", callback_data="smma_togglepublic")
-        kb.button(text=f"🌐 Services: {svc_status}", callback_data="smma_togglesmm")
-        kb.button(text="📊 Overall History", callback_data="smma_allorders")
-        kb.button(text="🔍 Check Any Order", callback_data="smma_checkorder")
-        kb.adjust(1)
+        kb.row(
+            InlineKeyboardButton(text="➕ Add Platform", callback_data="smma_addplat"),
+            InlineKeyboardButton(text="📂 Manage Platforms", callback_data="smma_listplat"),
+        )
+        kb.row(
+            InlineKeyboardButton(text="🏢 Manage Panels", callback_data="smma_listpanels"),
+            InlineKeyboardButton(text="➕ Add Panel", callback_data="smma_addpanel"),
+        )
+        kb.row(
+            InlineKeyboardButton(text=f"📢 Public Log: {pub_status}", callback_data="smma_togglepublic"),
+            InlineKeyboardButton(text=f"🌐 Services: {svc_status}", callback_data="smma_togglesmm"),
+        )
+        kb.row(
+            InlineKeyboardButton(text="📊 Overall History", callback_data="smma_allorders"),
+            InlineKeyboardButton(text="🔍 Check Any Order", callback_data="smma_checkorder"),
+        )
+        kb.row(
+            InlineKeyboardButton(text="⬅️ Admin Panel", callback_data="admin_refresh"),
+            InlineKeyboardButton(text="❌ Close", callback_data="delete_msg"),
+        )
         warn = ""
         if stale:
-            warn = "\n\n<blockquote>⚠️ <i>Auto-check has not run for 5+ minutes. Start it with asyncio.create_task(checker()), do not await it.</i></blockquote>"
+            warn = "<blockquote>⚠️ <i>Auto-check has not run for 5+ minutes.</i></blockquote>"
         if smm_panels.count_documents({}) == 0:
-            warn += "\n\n<blockquote>🏢 <i>No panel saved. Add one. Do not put the API key in source code.</i></blockquote>"
+            warn += "<blockquote>🏢 <i>No panel saved. Add one below.</i></blockquote>"
         text = (
-            "🛠️ <b>SMM admin</b>\n\n"
+            "<h2>🛠️ SMM Admin Control Center</h2>"
             + card(
                 f"🌐 <b>Ordering:</b> {svc_status}",
                 f"📢 <b>Public log:</b> {pub_status}",
@@ -1344,13 +1385,14 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
     @dp.message(Command("smmadmin"))
     async def smmadmin_cmd(msg: Message):
         if not is_admin(msg.from_user.id):
-            return await msg.answer("❌ <b>Not authorized.</b>", parse_mode="HTML")
+            return await msg.answer("<h2>❌ Not Authorized</h2>", parse_mode="HTML")
         await smmadmin_menu(msg, edit=False)
 
-    @dp.callback_query(F.data == "smma_back")
-    async def smma_back(cq: CallbackQuery):
+    @dp.callback_query(F.data.in_({"smma_back", "smm_adm_back"}))
+    async def smma_back(cq: CallbackQuery, state: FSMContext):
         if not is_admin(cq.from_user.id):
             return await cq.answer("Not authorized.", show_alert=True)
+        await state.clear()
         await smmadmin_menu(cq.message, edit=True)
         await cq.answer()
 
@@ -1377,7 +1419,13 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         if not is_admin(cq.from_user.id):
             return
         await state.set_state(SMMAdmin.waiting_panel_name)
-        await edit_html(cq.message, "<b>📝 Panel name</b>\n\n<blockquote><i>For example <u>Panel 2</u>. This name is only shown in the admin list.</i></blockquote>")
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smma_back"))
+        await edit_html(
+            cq.message,
+            "<h2>📝 Panel Name</h2><blockquote><i>For example <u>Panel 2</u>. This name is only shown in the admin list.</i></blockquote>",
+            kb.as_markup(),
+        )
         await cq.answer()
 
     @dp.message(SMMAdmin.waiting_panel_name)
@@ -1390,7 +1438,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         await state.update_data(panel_name=(msg.text or "").strip())
         await state.set_state(SMMAdmin.waiting_panel_url)
         await msg.answer(
-            "<b>🔗 API URL</b>\n\n<blockquote><i>Example: <u>https://panelsite.com/api/v2</u></i></blockquote>",
+            "<h2>🔗 API URL</h2><blockquote><i>Example: <u>https://panelsite.com/api/v2</u></i></blockquote>",
             parse_mode="HTML",
         )
 
@@ -1404,7 +1452,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         await state.update_data(panel_url=(msg.text or "").strip())
         await state.set_state(SMMAdmin.waiting_panel_key)
         await msg.answer(
-            "<b>🔑 API key</b>\n\n<blockquote><i>Send the key. The message is deleted after it is saved. Do not put the key in source code.</i></blockquote>",
+            "<h2>🔑 API Key</h2><blockquote><i>Send the key. The message is deleted after it is saved. Do not put the key in source code.</i></blockquote>",
             parse_mode="HTML",
         )
 
@@ -1426,17 +1474,21 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             await msg.delete()
         except Exception:
             pass
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="🔙 SMM Admin", callback_data="smma_back"))
         if success:
             await msg.answer(
-                f"✅ Panel <b>{h(panel['name'])}</b> added.\n\n"
+                f"<h2>✅ Panel {h(panel['name'])} Added</h2>"
                 + card(f"💰 <b>Balance:</b> <code>{h(resp.get('balance'))} {h(resp.get('currency'))}</code>"),
                 parse_mode="HTML",
+                reply_markup=kb.as_markup(),
             )
         else:
             await msg.answer(
-                f"⚠️ Panel <b>{h(panel['name'])}</b> saved, balance check fail.\n"
-                "<blockquote><i>The URL or key may be wrong. Check again from Manage Panels.</i></blockquote>",
+                f"<h2>⚠️ Panel {h(panel['name'])} Saved</h2>"
+                "<blockquote><i>Balance check failed — the URL or key may be wrong. Check again from Manage Panels.</i></blockquote>",
                 parse_mode="HTML",
+                reply_markup=kb.as_markup(),
             )
 
     @dp.callback_query(F.data == "smma_listpanels")
@@ -1447,12 +1499,12 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         kb = InlineKeyboardBuilder()
         if not panels:
             kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smma_back"))
-            return await edit_html(cq.message, "<b>🏢 Panels</b>\n\n<blockquote><i>No panels yet.</i></blockquote>", kb.as_markup())
+            return await edit_html(cq.message, "<h2>🏢 Panels</h2><blockquote><i>No panels yet.</i></blockquote>", kb.as_markup())
         for panel in panels:
             kb.button(text=button_label(f"🏢 {panel['name']}"), callback_data=f"smma_panel:{panel['_id']}")
         kb.adjust(1)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smma_back"))
-        await edit_html(cq.message, "<b>🏢 Manage panels</b>\n\n<blockquote><i>The key is not shown here.</i></blockquote>", kb.as_markup())
+        await edit_html(cq.message, "<h2>🏢 Manage Panels</h2><blockquote><i>Select a panel below. API keys are kept hidden.</i></blockquote>", kb.as_markup())
         await cq.answer()
 
     @dp.callback_query(F.data.startswith("smma_panel:"))
@@ -1470,7 +1522,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         kb.adjust(1)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smma_listpanels"))
         text = (
-            f"🏢 <b>{h(panel['name'])}</b>\n\n"
+            f"<h2>🏢 {h(panel['name'])}</h2>"
             + card(
                 f"🔗 <b>URL:</b> <code>{h(panel.get('api_url'))}</code>",
                 f"📦 <b>Services:</b> <code>{svc_count}</code>",
@@ -1514,7 +1566,13 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         if not is_admin(cq.from_user.id):
             return
         await state.set_state(SMMAdmin.waiting_platform_name)
-        await edit_html(cq.message, "<b>📝 Platform name</b>\n\n<blockquote><i>For example <u>Telegram</u> or <u>Instagram</u>.</i></blockquote>")
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smma_back"))
+        await edit_html(
+            cq.message,
+            "<h2>📝 Platform Name</h2><blockquote><i>For example <u>Telegram</u> or <u>Instagram</u>.</i></blockquote>",
+            kb.as_markup(),
+        )
         await cq.answer()
 
     @dp.message(SMMAdmin.waiting_platform_name)
@@ -1526,7 +1584,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             raise SkipHandler()
         await state.update_data(platform_name=(msg.text or "").strip())
         await state.set_state(SMMAdmin.waiting_platform_emoji)
-        await msg.answer("<b>😀 Emoji</b>\n\n<blockquote><i>Send one emoji, for example ✈️ or 📸.</i></blockquote>", parse_mode="HTML")
+        await msg.answer("<h2>😀 Platform Emoji</h2><blockquote><i>Send one emoji, for example ✈️ or 📸.</i></blockquote>", parse_mode="HTML")
 
     @dp.message(SMMAdmin.waiting_platform_emoji)
     async def smma_platemoji(msg: Message, state: FSMContext):
@@ -1535,7 +1593,9 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         data = await state.get_data()
         smm_platforms.insert_one({"name": data["platform_name"], "emoji": (msg.text or "📱").strip()[:8]})
         await state.clear()
-        await msg.answer(f"✅ Platform <b>{h(data['platform_name'])}</b> added.", parse_mode="HTML")
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="🔙 SMM Admin", callback_data="smma_back"))
+        await msg.answer(f"<h2>✅ Platform {h(data['platform_name'])} Added</h2>", parse_mode="HTML", reply_markup=kb.as_markup())
 
     @dp.callback_query(F.data == "smma_listplat")
     async def smma_listplat(cq: CallbackQuery):
@@ -1550,7 +1610,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             )
         kb.adjust(1)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smma_back"))
-        text = "<b>📂 Platforms</b>" if platforms else "<b>📂 Platforms</b>\n\n<blockquote><i>No platforms yet.</i></blockquote>"
+        text = "<h2>📂 Manage Platforms</h2><p>Select a platform below to manage its services:</p>" if platforms else "<h2>📂 Manage Platforms</h2><blockquote><i>No platforms yet.</i></blockquote>"
         await edit_html(cq.message, text, kb.as_markup())
         await cq.answer()
 
@@ -1570,7 +1630,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         kb.adjust(1)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smma_listplat"))
         text = (
-            f"{h(platform.get('emoji', '📱'))} <b>{h(platform['name'])}</b>\n\n"
+            f"<h2>{h(platform.get('emoji', '📱'))} {h(platform['name'])}</h2>"
             + card(f"📦 <b>Services:</b> <code>{len(services)}</code>")
         )
         await edit_html(cq.message, text, kb.as_markup())
@@ -1606,7 +1666,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             await state.set_state(SMMAdmin.waiting_service_provider_id)
             await edit_html(
                 cq.message,
-                f"🏢 <b>{h(panels[0]['name'])}</b>\n\n<blockquote>🆔 <i>Send the provider service ID from that panel's service list.</i></blockquote>",
+                f"<h2>🏢 {h(panels[0]['name'])}</h2><blockquote>🆔 <i>Send the provider service ID from that panel's service list.</i></blockquote>",
             )
             await cq.answer()
             return
@@ -1614,7 +1674,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         for panel in panels:
             kb.button(text=button_label(f"🏢 {panel['name']}"), callback_data=f"smma_addsvc_panel:{panel['_id']}")
         kb.adjust(1)
-        await edit_html(cq.message, "<b>🏢 Which panel?</b>\n\n<blockquote><i>Orders for this service will go through that panel's API.</i></blockquote>", kb.as_markup())
+        await edit_html(cq.message, "<h2>🏢 Select Provider Panel</h2><blockquote><i>Orders for this service will go through that panel's API.</i></blockquote>", kb.as_markup())
         await cq.answer()
 
     @dp.callback_query(F.data.startswith("smma_addsvc_panel:"))
@@ -1627,7 +1687,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         await state.set_state(SMMAdmin.waiting_service_provider_id)
         await edit_html(
             cq.message,
-            f"<b>🏢 {h(panel['name'] if panel else 'Panel')}</b>\n\n<blockquote><i>Send the provider service ID.</i></blockquote>",
+            f"<h2>🏢 {h(panel['name'] if panel else 'Panel')}</h2><blockquote><i>Send the provider service ID.</i></blockquote>",
         )
         await cq.answer()
 
@@ -1639,10 +1699,10 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             await state.clear()
             raise SkipHandler()
         if not (msg.text or "").strip().isdigit():
-            return await msg.answer("<b>❌ Send a number.</b>", parse_mode="HTML")
+            return await msg.answer("<h2>❌ Send a Number</h2>", parse_mode="HTML")
         await state.update_data(provider_service_id=int(msg.text.strip()))
         await state.set_state(SMMAdmin.waiting_service_name)
-        await msg.answer("<b>📝 Display name</b>\n\n<blockquote><i>Users will see this name. For example <u>Telegram Post Views — Instant</u>.</i></blockquote>", parse_mode="HTML")
+        await msg.answer("<h2>📝 Display Name</h2><blockquote><i>Users will see this name. For example <u>Telegram Post Views — Instant</u>.</i></blockquote>", parse_mode="HTML")
 
     @dp.message(SMMAdmin.waiting_service_name)
     async def smma_svc_name(msg: Message, state: FSMContext):
@@ -1650,7 +1710,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             return
         await state.update_data(service_name=(msg.text or "").strip())
         await state.set_state(SMMAdmin.waiting_service_price)
-        await msg.answer("<b>💰 Price per 1,000</b>\n\n<blockquote><i>Send an INR number, for example <u>4</u> or <u>4.5</u>.</i></blockquote>", parse_mode="HTML")
+        await msg.answer("<h2>💰 Price per 1,000</h2><blockquote><i>Send an INR number, for example <u>4</u> or <u>4.5</u>.</i></blockquote>", parse_mode="HTML")
 
     @dp.message(SMMAdmin.waiting_service_price)
     async def smma_svc_price(msg: Message, state: FSMContext):
@@ -1659,31 +1719,31 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         try:
             price = float((msg.text or "").strip())
         except ValueError:
-            return await msg.answer("<b>❌ Send a valid number.</b>", parse_mode="HTML")
+            return await msg.answer("<h2>❌ Send a Valid Number</h2>", parse_mode="HTML")
         await state.update_data(price=price)
         await state.set_state(SMMAdmin.waiting_service_min)
-        await msg.answer("<b>📉 Minimum quantity</b>", parse_mode="HTML")
+        await msg.answer("<h2>📉 Minimum Quantity</h2>", parse_mode="HTML")
 
     @dp.message(SMMAdmin.waiting_service_min)
     async def smma_svc_min(msg: Message, state: FSMContext):
         if not is_admin(msg.from_user.id):
             return
         if not (msg.text or "").strip().isdigit():
-            return await msg.answer("<b>❌ Send a number.</b>", parse_mode="HTML")
+            return await msg.answer("<h2>❌ Send a Number</h2>", parse_mode="HTML")
         await state.update_data(min_qty=int(msg.text.strip()))
         await state.set_state(SMMAdmin.waiting_service_max)
-        await msg.answer("<b>📈 Maximum quantity</b>", parse_mode="HTML")
+        await msg.answer("<h2>📈 Maximum Quantity</h2>", parse_mode="HTML")
 
     @dp.message(SMMAdmin.waiting_service_max)
     async def smma_svc_max(msg: Message, state: FSMContext):
         if not is_admin(msg.from_user.id):
             return
         if not (msg.text or "").strip().isdigit():
-            return await msg.answer("<b>❌ Send a number.</b>", parse_mode="HTML")
+            return await msg.answer("<h2>❌ Send a Number</h2>", parse_mode="HTML")
         data = await state.get_data()
         max_qty = int(msg.text.strip())
         if max_qty < data["min_qty"]:
-            return await msg.answer("<b>❌ Max cannot be lower than min.</b>", parse_mode="HTML")
+            return await msg.answer("<h2>❌ Max Cannot Be Lower Than Min</h2>", parse_mode="HTML")
         smm_services.insert_one({
             "platform_id": ObjectId(data["platform_id"]),
             "panel_id": ObjectId(data["panel_id"]),
@@ -1694,7 +1754,9 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             "max": max_qty,
         })
         await state.clear()
-        await msg.answer(f"✅ Service <b>{h(data['service_name'])}</b> added.", parse_mode="HTML")
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="🔙 Back to Platform", callback_data=f"smma_plat:{data['platform_id']}"))
+        await msg.answer(f"<h2>✅ Service {h(data['service_name'])} Added</h2>", parse_mode="HTML", reply_markup=kb.as_markup())
 
     @dp.callback_query(F.data.startswith("smma_svc:"))
     async def smma_svc_manage(cq: CallbackQuery):
@@ -1711,7 +1773,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         kb.adjust(1)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data=f"smma_plat:{svc['platform_id']}"))
         text = (
-            f"⚙️ <b>{h(svc['name'])}</b>\n\n"
+            f"<h2>⚙️ {h(svc['name'])}</h2>"
             + card(
                 f"🏢 <b>Panel:</b> {h(panel['name'] if panel else 'Unknown')}",
                 f"🆔 <b>Provider ID:</b> <code>{h(svc.get('provider_service_id'))}</code>",
@@ -1740,7 +1802,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             return
         await state.update_data(edit_service_id=cq.data.split(":", 1)[1])
         await state.set_state(SMMAdmin.waiting_edit_price)
-        await edit_html(cq.message, "<b>💰 New price per 1,000</b>\n\n<blockquote><i>Send an INR number.</i></blockquote>")
+        await edit_html(cq.message, "<h2>💰 New Price per 1,000</h2><blockquote><i>Send an INR number.</i></blockquote>")
         await cq.answer()
 
     @dp.message(SMMAdmin.waiting_edit_price)
@@ -1750,11 +1812,13 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         try:
             price = float((msg.text or "").strip())
         except ValueError:
-            return await msg.answer("<b>❌ Send a valid number.</b>", parse_mode="HTML")
+            return await msg.answer("<h2>❌ Send a Valid Number</h2>", parse_mode="HTML")
         data = await state.get_data()
         smm_services.update_one({"_id": ObjectId(data["edit_service_id"])}, {"$set": {"price_per_1000": price}})
         await state.clear()
-        await msg.answer(f"✅ Price updated: <code>{h(inr(price))}</code> / 1,000", parse_mode="HTML")
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="🔙 SMM Admin", callback_data="smma_back"))
+        await msg.answer(f"<h2>✅ Price Updated</h2><blockquote>New rate: <code>{h(inr(price))}</code> / 1,000</blockquote>", parse_mode="HTML", reply_markup=kb.as_markup())
 
     @dp.callback_query(F.data == "smma_allorders")
     async def smma_allorders(cq: CallbackQuery):
@@ -1764,8 +1828,8 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smma_back"))
         if not orders:
-            return await edit_html(cq.message, "📊 <b>Overall history</b>\n\n<blockquote>😔 <i>No orders yet.</i></blockquote>", kb.as_markup())
-        lines = ["📊 <b>Last 12 orders</b>"]
+            return await edit_html(cq.message, "<h2>📊 Overall History</h2><blockquote>😔 <i>No orders yet.</i></blockquote>", kb.as_markup())
+        lines = ["<h2>📊 Last 12 SMM Orders</h2>"]
         for order in orders:
             when = order.get("created_at")
             date_str = when.strftime("%d %b, %H:%M") if isinstance(when, datetime) else "—"
@@ -1781,7 +1845,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                 f"🔢 {h(qty_fmt(order.get('quantity')))}   💰 {h(price_txt)}   📊 {h(order.get('status'))}   🕒 {h(date_str)}"
                 "</blockquote>"
             )
-        await edit_html(cq.message, "\n\n".join(lines), kb.as_markup())
+        await edit_html(cq.message, "".join(lines), kb.as_markup())
         await cq.answer()
 
     @dp.callback_query(F.data == "smma_checkorder")
@@ -1789,9 +1853,12 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         if not is_admin(cq.from_user.id):
             return
         await state.set_state(SMMAdmin.waiting_admin_order_id)
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smma_back"))
         await edit_html(
             cq.message,
-            "<b>🔍 Any order</b>\n\n<blockquote><i>Send the user's order ID. If it completed or was canceled and they were not notified, the live status is also sent to them.</i></blockquote>",
+            "<h2>🔍 Check Any Order</h2><blockquote><i>Send the user's order ID. If it completed or was canceled and they were not notified, the live status is also sent to them.</i></blockquote>",
+            kb.as_markup(),
         )
         await cq.answer()
 

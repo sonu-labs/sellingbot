@@ -14,6 +14,13 @@ from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from rich_messages import (
+    TELEGRAM_EMOJI_ID,
+    WHATSAPP_EMOJI_ID,
+    tg_icon,
+    wa_icon,
+    premium_button,
+)
 
 TEMPORASMS_BASE = "https://api.temporasms.com/stubs/handler_api.php"
 LZT_BASE = "https://prod-api.lzt.market"
@@ -131,8 +138,8 @@ class Server3Edit(StatesGroup):
 
 
 def category_meta(category):
-    return {"wa": {"name": "WhatsApp", "emoji": "💬", "toggle_field": "s3_wa_status"}}.get(
-        category, {"name": category.upper(), "emoji": "📦", "toggle_field": "s3_unknown_status"}
+    return {"wa": {"name": "WhatsApp", "emoji": wa_icon(), "toggle_field": "s3_wa_status"}}.get(
+        category, {"name": category.upper(), "emoji": tg_icon(), "toggle_field": "s3_unknown_status"}
     )
 
 
@@ -284,15 +291,32 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
     # =====================  LZT MARKET (TG) CORE  =================
     # ============================================================
 
+    def get_user_discount(user_id):
+        if not user_id:
+            return 0.0
+        u = users_col.find_one({"_id": user_id}) or {}
+        try:
+            pct = float(u.get("discount_percent", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        return max(0.0, min(100.0, pct))
+
+    def apply_user_discount(amount, user_id=None):
+        pct = get_user_discount(user_id)
+        if pct <= 0:
+            return round(float(amount), 2)
+        return round(float(amount) * (1.0 - pct / 100.0), 2)
+
     def get_lzt_token():
         return get_settings().get("lzt_token")
 
     def get_lzt_margin():
         return get_settings().get("lzt_margin_percent", 20)
 
-    def usd_to_sell_inr(usd_price):
+    def usd_to_sell_inr(usd_price, user_id=None):
         margin = get_lzt_margin()
-        return round(usd_price * exchange_rate * (1 + margin / 100), 2)
+        base = round(usd_price * exchange_rate * (1 + margin / 100), 2)
+        return apply_user_discount(base, user_id)
 
     def format_time_ago(ts):
         """Converts a unix timestamp (telegram_last_seen etc.) into a human readable 'x ago' string."""
@@ -372,10 +396,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
     # =====================  ADMIN DASHBOARD  =====================
     # ============================================================
 
-    @dp.message(Command("manage3"))
-    async def cmd_manage3(msg: Message):
-        if not is_admin(msg.from_user.id): return await msg.answer("❌ Unauthorized.")
-
+    async def render_manage3_dashboard(target, edit: bool = False):
         s = get_settings()
         s3_wa = s.get("s3_wa_status", "on")
         lzt_enabled = s.get("lzt_enabled", False)
@@ -386,11 +407,21 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
 
         kb = InlineKeyboardBuilder()
         kb.row(
-            InlineKeyboardButton(text=f"💬 WhatsApp: {'🟢 ON' if s3_wa == 'on' else '🔴 OFF'}", callback_data="s3_toggle:wa"),
-            InlineKeyboardButton(text=f"📱 Telegram (LZT): {'🟢 ON' if lzt_enabled else '🔴 OFF'}", callback_data="s3_toggle:lzt")
+            InlineKeyboardButton(
+                text=f"💬 WhatsApp: {'🟢 ON' if s3_wa == 'on' else '🔴 OFF'}",
+                callback_data="s3_toggle:wa",
+                icon_custom_emoji_id=WHATSAPP_EMOJI_ID,
+            ),
+            InlineKeyboardButton(
+                text=f"✈️ Telegram (LZT): {'🟢 ON' if lzt_enabled else '🔴 OFF'}",
+                callback_data="s3_toggle:lzt",
+                icon_custom_emoji_id=TELEGRAM_EMOJI_ID,
+            ),
         )
-        kb.row(InlineKeyboardButton(text=f"💲 USD Display: {'🟢 ON' if usd_disp == 'on' else '🔴 OFF'}", callback_data="s3_toggle:usd"))
-        kb.row(InlineKeyboardButton(text=f"🐛 API Debug Log: {'🟢 ON' if debug_mode == 'on' else '🔴 OFF'}", callback_data="s3_toggle:debug"))
+        kb.row(
+            InlineKeyboardButton(text=f"💲 USD Display: {'🟢 ON' if usd_disp == 'on' else '🔴 OFF'}", callback_data="s3_toggle:usd"),
+            InlineKeyboardButton(text=f"🐛 Debug Log: {'🟢 ON' if debug_mode == 'on' else '🔴 OFF'}", callback_data="s3_toggle:debug"),
+        )
         kb.row(
             InlineKeyboardButton(text="➕ Add WA Catalog", callback_data="s3_add_item"),
             InlineKeyboardButton(text="✏️ Edit WA Catalog", callback_data="s3_edit_list")
@@ -403,18 +434,45 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             InlineKeyboardButton(text="🔑 Set LZT Token", callback_data="lzt_settoken"),
             InlineKeyboardButton(text="💵 Set LZT Margin %", callback_data="lzt_setmargin")
         )
-        kb.row(InlineKeyboardButton(text="🧪 Test LZT Connection", callback_data="lzt_test"))
-        kb.row(InlineKeyboardButton(text="❌ Close Dashboard", callback_data="delete_msg"))
+        kb.row(
+            InlineKeyboardButton(text="🧪 Test LZT API", callback_data="lzt_test"),
+            InlineKeyboardButton(text="📊 LZT Balance & Sales", callback_data="lzt_balance_btn"),
+        )
+        kb.row(
+            InlineKeyboardButton(text="⬅️ Admin Panel", callback_data="admin_refresh"),
+            InlineKeyboardButton(text="❌ Close", callback_data="delete_msg"),
+        )
 
         text = (
-            f"<b>🤖 Server 3 Manager</b>\n\n"
+            f"<h2>🛰️ Server 3 & LZT Manager</h2>"
             f"<blockquote>"
-            f"💬 <b>WhatsApp (TemporaSMS):</b> {tempora_bal:.4f} USDT\n"
-            f"📱 <b>Telegram (LZT):</b> Margin {lzt_margin}%\n\n"
-            f"⚙️ USD Display: {usd_disp.upper()} | 🐛 Debug: {debug_mode.upper()}"
+            f"{wa_icon()} <b>WhatsApp (TemporaSMS):</b> <code>{tempora_bal:.4f} USDT</code> ({'🟢 ON' if s3_wa == 'on' else '🔴 OFF'})\n"
+            f"{tg_icon()} <b>Telegram (LZT Market):</b> Margin <code>{lzt_margin}%</code> ({'🟢 ON' if lzt_enabled else '🔴 OFF'})\n"
+            f"⚙️ <b>USD Display:</b> <code>{usd_disp.upper()}</code>  •  🐛 <b>Debug:</b> <code>{debug_mode.upper()}</code>"
             f"</blockquote>"
+            f"<p><i>Configure live WhatsApp OTP catalogs, LZT Market API tokens, profit margins, and diagnostics below:</i></p>"
         )
-        await msg.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
+        if edit:
+            try:
+                await target.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
+                return
+            except Exception:
+                pass
+        await target.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
+
+    @dp.message(Command("manage3"))
+    async def cmd_manage3(msg: Message):
+        if not is_admin(msg.from_user.id):
+            return await msg.answer("<h2>❌ Unauthorized</h2><p>Admin access required.</p>", parse_mode="HTML")
+        await render_manage3_dashboard(msg, edit=False)
+
+    @dp.callback_query(F.data == "s3m_home")
+    async def cb_manage3_home(cq: CallbackQuery, state: FSMContext):
+        if not is_admin(cq.from_user.id):
+            return await cq.answer("Unauthorized", show_alert=True)
+        await state.clear()
+        await cq.answer()
+        await render_manage3_dashboard(cq.message, edit=True)
 
     @dp.callback_query(F.data.startswith("s3_toggle:"))
     async def s3_toggles(cq: CallbackQuery):
@@ -430,14 +488,19 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             current = get_settings().get(field, "on" if field in default_on else "off")
             settings_col.update_one({"_id": "server_config"}, {"$set": {field: "off" if current == "on" else "on"}}, upsert=True)
         await cq.answer("✅ Updated!", show_alert=False)
-        await cq.message.delete()
-        await cmd_manage3(cq.message)
+        await render_manage3_dashboard(cq.message, edit=True)
 
     @dp.callback_query(F.data == "lzt_settoken")
     async def lzt_settoken(cq: CallbackQuery, state: FSMContext):
         if not is_admin(cq.from_user.id): return
         await state.set_state(Server3Admin.waiting_lzt_token)
-        await cq.message.edit_text("🔑 <b>Send your LZT Market API token:</b>", parse_mode="HTML")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="s3m_home")]])
+        await cq.message.edit_text(
+            "<h2>🔑 Set LZT Market Token</h2>"
+            "<blockquote>Send your LZT Market API Bearer token below:</blockquote>",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
         await cq.answer()
 
     @dp.message(StateFilter(Server3Admin.waiting_lzt_token))
@@ -447,34 +510,63 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         await state.clear()
         try: await msg.delete()
         except Exception: pass
-        await msg.answer("✅ LZT token saved. Test it with 🧪 Test LZT Connection.")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Server 3 Manager", callback_data="s3m_home")]])
+        await msg.answer(
+            "<h2>✅ LZT Token Saved</h2>"
+            "<blockquote>Your LZT Market token has been updated. Use <b>🧪 Test LZT API</b> to verify connectivity.</blockquote>",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
 
     @dp.callback_query(F.data == "lzt_setmargin")
     async def lzt_setmargin(cq: CallbackQuery, state: FSMContext):
         if not is_admin(cq.from_user.id): return
         await state.set_state(Server3Admin.waiting_lzt_margin)
-        await cq.message.edit_text("💵 <b>Enter profit margin percentage:</b>\n<i>(Ex: 20 = LZT cost + 20%)</i>", parse_mode="HTML")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="s3m_home")]])
+        await cq.message.edit_text(
+            "<h2>💵 Set LZT Profit Margin</h2>"
+            "<blockquote>Enter your profit margin percentage (e.g. <code>20</code> = LZT cost + 20%):</blockquote>",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
         await cq.answer()
 
     @dp.message(StateFilter(Server3Admin.waiting_lzt_margin))
     async def lzt_setmargin_save(msg: Message, state: FSMContext):
         try: margin = float(msg.text.strip())
-        except ValueError: return await msg.answer("❌ Send a valid number.")
+        except ValueError: return await msg.answer("<h2>❌ Invalid Input</h2><p>Please send a valid number.</p>", parse_mode="HTML")
         settings_col.update_one({"_id": "server_config"}, {"$set": {"lzt_margin_percent": margin}}, upsert=True)
         await state.clear()
-        await msg.answer(f"✅ Margin set to {margin}%")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Server 3 Manager", callback_data="s3m_home")]])
+        await msg.answer(
+            f"<h2>✅ Margin Updated</h2><blockquote>LZT profit margin is now set to <b>{margin}%</b>.</blockquote>",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
 
     @dp.callback_query(F.data == "lzt_test")
     async def lzt_test(cq: CallbackQuery):
         if not is_admin(cq.from_user.id): return
-        await cq.answer("Testing...", show_alert=False)
+        await cq.answer("Testing LZT connection...", show_alert=False)
         status, data = await lzt_request("GET", LZT_SEARCH_URL, params={"country[]": "IN", "order_by": "price_to_up", "currency": "usd", "page": 1}, action_label="LZT: Connection Test")
         if status == 200 and "items" in data:
             count = len(data["items"])
-            await bot.send_message(cq.from_user.id, f"✅ LZT connection OK. India search returned {count} live items right now.\n(Check ADMINLOG for full raw response.)")
+            await bot.send_message(
+                cq.from_user.id,
+                f"<h2>✅ LZT Connection OK</h2>"
+                f"<blockquote>India search returned <b>{count}</b> live items right now.</blockquote>"
+                f"<p><i>Check ADMINLOG for full raw API response.</i></p>",
+                parse_mode="HTML",
+            )
         else:
             errs = data.get("errors", ["Unknown"]) if isinstance(data, dict) else ["Unknown"]
-            await bot.send_message(cq.from_user.id, f"❌ LZT test failed (status {status}): {'; '.join(errs)}\n(Full raw response sent to ADMINLOG.)")
+            await bot.send_message(
+                cq.from_user.id,
+                f"<h2>❌ LZT Test Failed (HTTP {status})</h2>"
+                f"<blockquote><code>{escape('; '.join(errs))}</code></blockquote>"
+                f"<p><i>Full raw response sent to ADMINLOG.</i></p>",
+                parse_mode="HTML",
+            )
 
     # ============================================================
     # ===================  WA: ADD CATALOG FLOW  ===================
@@ -585,11 +677,16 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         )
 
         await checking_msg.edit_text(
-            f"<b>✅ Catalog Saved!</b>\n\n<blockquote>"
-            f"💬 WhatsApp (code: <code>{final_code}</code>)\n🌍 <b>{data['country_name']}</b> | Op {data['operator']}\n"
-            f"💵 <b>Price:</b> ₹{data['sell_price_inr']:.2f}\n🛡️ <b>Cap:</b> {max_price} USDT\n\n"
-            f"📡 <b>Live Cost:</b> {live_price:.4f} USDT (₹{live_price_inr:.2f})\n💵 <b>Margin:</b> ₹{margin:.2f}</blockquote>",
-            parse_mode="HTML"
+            f"<h2>✅ Catalog Saved!</h2>"
+            f"<blockquote>"
+            f"{wa_icon()} <b>WhatsApp</b> (code: <code>{final_code}</code>)\n"
+            f"🌍 <b>{data['country_name']}</b> | Op <code>{data['operator']}</code>\n"
+            f"💵 <b>Price:</b> <code>₹{data['sell_price_inr']:.2f}</code>  •  🛡️ <b>Cap:</b> <code>{max_price} USDT</code>\n"
+            f"📡 <b>Live Cost:</b> <code>{live_price:.4f} USDT</code> (₹{live_price_inr:.2f})\n"
+            f"📈 <b>Margin:</b> <code>₹{margin:.2f}</code>"
+            f"</blockquote>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Server 3 Manager", callback_data="s3m_home")]]),
         )
         await state.clear()
 
@@ -598,13 +695,21 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         if not is_admin(cq.from_user.id): return
         items = list(s3_catalog.find({}))
         if not items:
-            return await cq.message.edit_text("📭 Catalog is empty.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="delete_msg")]]))
+            return await cq.message.edit_text(
+                "<h2>📭 Catalog Empty</h2><p>No WhatsApp Server 3 catalog items found.</p>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="s3m_home")]]),
+            )
         kb = InlineKeyboardBuilder()
         for i in items:
             kb.button(text=f"❌ {i['country_name']} Op{i['operator']} ({i['service_code']})", callback_data=f"s3_del:{str(i['_id'])}")
         kb.adjust(1)
-        kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="delete_msg"))
-        await cq.message.edit_text("🗑️ <b>Tap to remove:</b>", parse_mode="HTML", reply_markup=kb.as_markup())
+        kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="s3m_home"))
+        await cq.message.edit_text(
+            "<h2>🗑️ Remove WA Catalog Item</h2><p>Tap an entry below to delete it from Server 3:</p>",
+            parse_mode="HTML",
+            reply_markup=kb.as_markup(),
+        )
 
     @dp.callback_query(F.data.startswith("s3_del:"))
     async def s3_del_execute(cq: CallbackQuery):
@@ -616,34 +721,55 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
     @dp.callback_query(F.data == "s3_price_check")
     async def s3_price_checker(cq: CallbackQuery):
         if not is_admin(cq.from_user.id): return
-        await cq.message.edit_text("🔄 <i>Fetching live API costs...</i>", parse_mode="HTML")
+        await cq.message.edit_text(
+            "<h2>🔄 Fetching Live API Costs</h2><p><i>Auditing all WhatsApp catalog routes...</i></p>",
+            parse_mode="HTML",
+        )
         catalog = list(s3_catalog.find({}))
-        if not catalog: return await cq.message.edit_text("❌ No items in catalog.")
-        lines = ["<b>🔍 WA Live Margin Audit</b>\n"]
+        if not catalog:
+            return await cq.message.edit_text(
+                "<h2>❌ No Items</h2><p>The WhatsApp catalog is empty.</p>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="s3m_home")]]),
+            )
+        lines = ["<h2>🔍 WA Live Margin Audit</h2>"]
         for item in catalog:
             is_valid, err, cost = await check_live_combo(item['service_code'], item['country_code'], item['operator'])
             if not is_valid:
-                lines.append(f"⚠️ <b>{item['country_name']} Op{item['operator']}</b> — <code>{err}</code> (dead route)\n")
+                lines.append(
+                    f"<blockquote>⚠️ <b>{item['country_name']} Op{item['operator']}</b> — <code>{err}</code> (dead route)</blockquote>"
+                )
                 continue
             cost_inr = cost * exchange_rate
             margin = item['sell_price_inr'] - cost_inr
             e = "🟢" if margin > 0 else "🔴"
-            lines.append(f"{e} <b>{item['country_name']} Op{item['operator']}</b>\nCost: ₹{cost_inr:.2f} | Sell: ₹{item['sell_price_inr']:.2f} | Profit: <b>₹{margin:.2f}</b>\n")
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="delete_msg")]])
-        await cq.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+            lines.append(
+                f"<blockquote>{e} <b>{item['country_name']} Op{item['operator']}</b>\n"
+                f"Cost: <code>₹{cost_inr:.2f}</code> | Sell: <code>₹{item['sell_price_inr']:.2f}</code> | Profit: <b>₹{margin:.2f}</b></blockquote>"
+            )
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="s3m_home")]])
+        await cq.message.edit_text("".join(lines), parse_mode="HTML", reply_markup=kb)
 
     @dp.callback_query(F.data == "s3_edit_list")
     async def s3_edit_start(cq: CallbackQuery):
         if not is_admin(cq.from_user.id): return
         items = list(s3_catalog.find({}))
         if not items:
-            return await cq.message.edit_text("📭 Catalog is empty.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="delete_msg")]]))
+            return await cq.message.edit_text(
+                "<h2>📭 Catalog Empty</h2><p>No WhatsApp catalog items found.</p>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="s3m_home")]]),
+            )
         kb = InlineKeyboardBuilder()
         for i in items:
             kb.button(text=f"✏️ {i['country_name']} Op{i['operator']} (₹{i['sell_price_inr']})", callback_data=f"s3_ed_item:{str(i['_id'])}")
         kb.adjust(1)
-        kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="delete_msg"))
-        await cq.message.edit_text("<b>✏️ Select Item:</b>", parse_mode="HTML", reply_markup=kb.as_markup())
+        kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="s3m_home"))
+        await cq.message.edit_text(
+            "<h2>✏️ Edit WA Catalog Item</h2><p>Select a route below to update its price or USDT cap:</p>",
+            parse_mode="HTML",
+            reply_markup=kb.as_markup(),
+        )
 
     @dp.callback_query(F.data.startswith("s3_ed_item:"))
     async def s3_edit_options(cq: CallbackQuery, state: FSMContext):
@@ -651,7 +777,14 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         item = s3_catalog.find_one({"_id": ObjectId(cq.data.split(":")[1])})
         if not item: return await cq.answer("Not found!", show_alert=True)
         await state.update_data(edit_item_id=str(item["_id"]), item_name=f"{item['country_name']} (Op {item['operator']})")
-        text = f"<b>🛠️ {item['country_name']}</b>\n\n<blockquote>📶 Op: {item['operator']}\n💰 Price: ₹{item['sell_price_inr']:.2f}\n🛡️ Cap: {item['max_price_cap']} USDT</blockquote>"
+        text = (
+            f"<h2>🛠️ {item['country_name']}</h2>"
+            f"<blockquote>"
+            f"📶 <b>Operator:</b> <code>{item['operator']}</code>\n"
+            f"💰 <b>Selling Price:</b> <code>₹{item['sell_price_inr']:.2f}</code>\n"
+            f"🛡️ <b>Max Price Cap:</b> <code>{item['max_price_cap']} USDT</code>"
+            f"</blockquote>"
+        )
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text="💰 Change Price", callback_data="s3_chg:price"), InlineKeyboardButton(text="🛡️ Change Cap", callback_data="s3_chg:cap"))
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="s3_edit_list"))
@@ -662,33 +795,40 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         action = cq.data.split(":")[1]
         data = await state.get_data()
         if action == "price":
-            await cq.message.edit_text(f"💰 New price for {data['item_name']}:", parse_mode="HTML")
+            await cq.message.edit_text(f"<h2>💰 Update Price</h2><blockquote>Enter new INR price for <b>{data['item_name']}</b>:</blockquote>", parse_mode="HTML")
             await state.set_state(Server3Edit.waiting_new_price)
         else:
-            await cq.message.edit_text(f"🛡️ New max cap for {data['item_name']}:", parse_mode="HTML")
+            await cq.message.edit_text(f"<h2>🛡️ Update Cap</h2><blockquote>Enter new max USDT cap for <b>{data['item_name']}</b>:</blockquote>", parse_mode="HTML")
             await state.set_state(Server3Edit.waiting_new_cap)
 
     @dp.message(StateFilter(Server3Edit.waiting_new_price))
     async def s3_save_new_price(msg: Message, state: FSMContext):
         try: new_inr = float(msg.text.strip())
-        except: return await msg.answer("❌ Invalid number.")
+        except: return await msg.answer("<h2>❌ Invalid Number</h2>", parse_mode="HTML")
         data = await state.get_data()
         s3_catalog.update_one({"_id": ObjectId(data['edit_item_id'])}, {"$set": {"sell_price_inr": new_inr, "sell_price_usd": new_inr / exchange_rate}})
-        await msg.answer(f"✅ Price updated to ₹{new_inr:.2f}!")
+        await msg.answer(
+            f"<h2>✅ Price Updated</h2><blockquote>New selling price: <b>₹{new_inr:.2f}</b></blockquote>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Server 3 Manager", callback_data="s3m_home")]]),
+        )
         await state.clear()
 
     @dp.message(StateFilter(Server3Edit.waiting_new_cap))
     async def s3_save_new_cap(msg: Message, state: FSMContext):
         try: new_cap = float(msg.text.strip())
-        except: return await msg.answer("❌ Invalid number.")
+        except: return await msg.answer("<h2>❌ Invalid Number</h2>", parse_mode="HTML")
         data = await state.get_data()
         s3_catalog.update_one({"_id": ObjectId(data['edit_item_id'])}, {"$set": {"max_price_cap": new_cap}})
-        await msg.answer(f"✅ Cap updated to {new_cap} USDT!")
+        await msg.answer(
+            f"<h2>✅ Cap Updated</h2><blockquote>New max API cap: <b>{new_cap} USDT</b></blockquote>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Server 3 Manager", callback_data="s3m_home")]]),
+        )
         await state.clear()
 
     # ============================================================
     # ==================  WA: USER BUY FLOW  =======================
-    # (unchanged from before — TemporaSMS number rental)
     # ============================================================
 
     @dp.callback_query(F.data == "buy_wa")
@@ -706,13 +846,21 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         pipeline = [{"$match": {"category": category}}, {"$group": {"_id": "$country_code", "name": {"$first": "$country_name"}}}]
         countries = list(s3_catalog.aggregate(pipeline))
         if not countries:
-            return await cq.message.edit_text("📭 No countries available right now.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="back_main")]]))
+            return await cq.message.edit_text(
+                "<h2>📭 No Countries Available</h2><p>All regions are temporarily out of stock. Please check back shortly.</p>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="back_main")]]),
+            )
         kb = InlineKeyboardBuilder()
         for c in countries:
             kb.button(text=c['name'], callback_data=f"s3_user_ops:{category}:{c['_id']}")
         kb.adjust(2)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="back_main"))
-        text = f"<b>{cm['emoji']} {cm['name']} Registration [Server 3]</b>\n\n<blockquote>🌍 Select Region:</blockquote>\n<i>⚡ Instant SMS Delivery</i>"
+        text = (
+            f"<h2>{cm['emoji']} {cm['name']} Registration [Server 3]</h2>"
+            f"<blockquote>🌍 <b>Select a Region Below:</b></blockquote>"
+            f"<p><i>⚡ Instant automated SMS OTP delivery with auto-refund protection.</i></p>"
+        )
         await cq.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
     @dp.callback_query(F.data.startswith("s3_user_ops:"))
@@ -723,13 +871,20 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         if not items: return await cq.answer("No operators found.", show_alert=True)
         country_name = items[0]['country_name']
         usd_toggle = get_settings().get("s3_usd_display", "off")
+        disc = get_user_discount(cq.from_user.id)
         kb = InlineKeyboardBuilder()
         for item in items:
-            btn = f"Operator {item['operator']} ➔ ₹{item['sell_price_inr']:.2f}" + (f"/${item['sell_price_usd']:.2f}" if usd_toggle == "on" else "")
+            inr_p = apply_user_discount(item['sell_price_inr'], cq.from_user.id)
+            usd_p = inr_p / exchange_rate
+            btn = f"📶 Operator {item['operator']} • ₹{inr_p:.2f}" + (f" (${usd_p:.2f})" if usd_toggle == "on" else "")
             kb.button(text=btn, callback_data=f"s3_user_terms:{str(item['_id'])}")
         kb.adjust(1)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data=f"buy_server3:{category}"))
-        text = f"<b>{cm['emoji']} {cm['name']} | {country_name}</b>\n\n<blockquote>📶 Select an operator line:</blockquote>"
+        disc_line = f"\n🏷️ <b>VIP Discount Active:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
+        text = (
+            f"<h2>{cm['emoji']} {cm['name']} — {country_name}</h2>"
+            f"<blockquote>📶 <b>Select an operator line below:</b>{disc_line}</blockquote>"
+        )
         await cq.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
     @dp.callback_query(F.data.startswith("s3_user_terms:"))
@@ -738,22 +893,27 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         if not item: return await cq.answer("Error.")
         cm = category_meta(item['category'])
         usd_toggle = get_settings().get("s3_usd_display", "off")
-        price_label = f"₹{item['sell_price_inr']:.2f} | ${item['sell_price_usd']:.2f}" if usd_toggle == "on" else f"₹{item['sell_price_inr']:.2f}"
+        disc = get_user_discount(cq.from_user.id)
+        inr_p = apply_user_discount(item['sell_price_inr'], cq.from_user.id)
+        usd_p = inr_p / exchange_rate
+        price_label = f"₹{inr_p:.2f} | ${usd_p:.2f}" if usd_toggle == "on" else f"₹{inr_p:.2f}"
+        disc_line = f"\n🏷️ <b>VIP Discount:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
         text = (
-            "<b>🛒 Order Confirmation & Terms</b>\n\n"
+            "<h2>🛒 Order Confirmation & Terms</h2>"
             "<blockquote>"
             f"{cm['emoji']} <b>App:</b> {cm['name']}\n"
             f"🌍 <b>Region:</b> {item['country_name']}\n"
             f"📶 <b>Operator:</b> Line {item['operator']}\n"
-            f"💰 <b>Price:</b> {price_label}"
-            "</blockquote>\n\n"
-            "📌 <b>Note:</b> You are only charged if the OTP is received.\n\n"
+            f"💰 <b>Price:</b> <code>{price_label}</code>{disc_line}"
+            "</blockquote>"
+            "<p>📌 <b>Zero-Risk Billing:</b> You are only charged if the OTP is delivered.</p>"
+            "<blockquote>"
             "🚨 <b>Terms & Conditions:</b>\n"
-            "• If OTP is not received in time, you may cancel and try a different line — no charge in that case.\n"
-            "• If OTP is received but you enter it wrong, or the login fails on your end, the bot is <b>not responsible</b>.\n"
-            "• Always use a <b>VPN/Proxy</b> matching the number's region, or a fresh device, when logging in.\n"
-            "• <b>No refund</b> once the OTP has been delivered — regardless of what happens after (account banned, login failed, or anything else).\n\n"
-            "<i>⚠️ Tap 'Accept & Reserve' only if you agree to these terms.</i>"
+            "• If no OTP arrives in time, cancel and try another line at <b>zero cost</b>.\n"
+            "• Always use a <b>VPN/Proxy</b> matching the number's region or a clean device.\n"
+            "• <b>No refund</b> once the OTP code has been delivered."
+            "</blockquote>"
+            "<p><i>⚠️ Tap <b>Accept & Reserve</b> to allocate your number immediately.</i></p>"
         )
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text="✅ Accept & Reserve", callback_data=f"s3_final_buy:{str(item['_id'])}"))
@@ -764,7 +924,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         if not order or order.get("status") != "waiting":
             return False, "Already processed"
         item = s3_catalog.find_one({"_id": ObjectId(item_id)})
-        refund_amount = item["sell_price_inr"] if item else order.get("price", 0.0)
+        refund_amount = order.get("price") if order.get("price") is not None else (item["sell_price_inr"] if item else 0.0)
         orders_col.update_one({"order_id": order_id}, {"$set": {"status": "cancelled"}})
         user = users_col.find_one({"_id": user_id}) or {}
         new_bal = user.get("balance", 0.0) + refund_amount
@@ -788,9 +948,13 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
                 orders_col.update_one({"order_id": order_id}, {"$set": {"status": "completed", "otp": otp_code}})
                 kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 Copy OTP Code", copy_text=CopyTextButton(text=otp_code))]])
                 success_text = (
-                    f"<b>✅ Order Completed</b>\n\n<blockquote>"
-                    f"{cm['emoji']} <b>App:</b> {cm['name']}\n📞 <b>Number:</b> <code>{phone_number}</code>\n"
-                    f"💬 <b>OTP Code:</b> <code>{otp_code}</code></blockquote>\n<i>Tap below to copy!</i>"
+                    f"<h2>✅ Order Completed</h2>"
+                    f"<blockquote>"
+                    f"{cm['emoji']} <b>App:</b> {cm['name']}\n"
+                    f"📞 <b>Number:</b> <code>{phone_number}</code>\n"
+                    f"🔑 <b>OTP Code:</b> <code>{otp_code}</code>"
+                    f"</blockquote>"
+                    f"<p><i>Tap the button below to copy your OTP code!</i></p>"
                 )
                 try:
                     await bot.edit_message_text(text=success_text, chat_id=user_id, message_id=msg_to_edit, parse_mode="HTML", reply_markup=kb)
@@ -798,18 +962,28 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
                     await bot.send_message(user_id, success_text, parse_mode="HTML", reply_markup=kb)
 
                 public_log = (
-                    f"<blockquote>✅ New {cm['name']} Number Purchase Successful</blockquote>\n\n"
-                    f"➖ <u><b>Country:</b></u> {item['country_name']}\n➖ <u><b>Application:</b></u> {cm['name']} 🍷\n\n"
-                    f"➕ <b>Number:</b> {mask_phone(phone_number)} 📞\n➕ <b>Code:</b> •••• 💬\n\n"
-                    f"<b>• @{BOTUSER} || @{CHANNEL}</b>"
+                    f"<h2>✅ New {cm['name']} Purchase</h2>"
+                    f"<blockquote>"
+                    f"🌍 <b>Country:</b> {item['country_name']}\n"
+                    f"{cm['emoji']} <b>Application:</b> {cm['name']}\n"
+                    f"📞 <b>Number:</b> <code>{mask_phone(phone_number)}</code>\n"
+                    f"🔑 <b>Code:</b> <code>••••</code>"
+                    f"</blockquote>"
+                    f"<p><b>• @{BOTUSER} || @{CHANNEL}</b></p>"
                 )
                 kb_pub = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="• Buy Now •", url=f"https://t.me/{BOTUSER}?start=s3wa")]])
                 try: await bot.send_message(SALES, public_log, parse_mode="HTML", reply_markup=kb_pub)
                 except: pass
 
                 admin_log = (
-                    f"📢 <b>STORE SALE ALERT (WhatsApp)</b>\n\n➖ <b>Country:</b> {item['country_name']}\n"
-                    f"➕ <b>Number:</b> {phone_number}\n➕ <b>OTP:</b> {otp_code}\n➕ <b>Buyer:</b> <code>{user_id}</code>\n➕ <b>Price:</b> ₹{item['sell_price_inr']}"
+                    f"<h2>📢 Store Sale Alert ({cm['name']})</h2>"
+                    f"<blockquote>"
+                    f"🌍 <b>Country:</b> {item['country_name']}\n"
+                    f"📞 <b>Number:</b> <code>{phone_number}</code>\n"
+                    f"🔑 <b>OTP:</b> <code>{otp_code}</code>\n"
+                    f"👤 <b>Buyer:</b> <code>{user_id}</code>\n"
+                    f"💵 <b>Price:</b> ₹{item['sell_price_inr']}"
+                    f"</blockquote>"
                 )
                 try: await bot.send_message(ADMINLOG, admin_log, parse_mode="HTML")
                 except: pass
@@ -821,7 +995,13 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         await s3_api_call(f"TemporaSMS: Auto-Cancel (Order:{order_id})", cancel_url)
         success, refund_amount = await process_s3_refund(user_id, order_id, item_id)
         if success:
-            cancel_text = f"<b>⚠️ Order Auto-Cancelled (Timeout)</b>\n\nNo OTP received in time.\n\n💰 <b>Refunded:</b> ₹{refund_amount:.2f}"
+            cancel_text = (
+                f"<h2>⚠️ Order Auto-Cancelled (Timeout)</h2>"
+                f"<blockquote>"
+                f"No OTP was received in time.\n"
+                f"💰 <b>Refunded:</b> <code>₹{refund_amount:.2f}</code>"
+                f"</blockquote>"
+            )
             try: await bot.edit_message_text(text=cancel_text, chat_id=user_id, message_id=msg_to_edit, parse_mode="HTML")
             except: await bot.send_message(user_id, cancel_text, parse_mode="HTML")
 
@@ -833,17 +1013,20 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         cm = category_meta(item['category'])
         user_id = cq.from_user.id
         user = users_col.find_one({"_id": user_id}) or {"_id": user_id, "balance": 0.0}
-        inr_price = item["sell_price_inr"]
+        inr_price = apply_user_discount(item["sell_price_inr"], user_id)
         if user.get("balance", 0.0) < inr_price:
             return await cq.answer("❌ Insufficient Balance!", show_alert=True)
 
-        status_msg = await cq.message.edit_text("⏳ <i>Connecting to Server 3... Reserving allocation...</i>", parse_mode="HTML")
+        status_msg = await cq.message.edit_text(
+            "<h2>⏳ Allocating Number...</h2><p><i>Connecting to Server 3 and reserving your line...</i></p>",
+            parse_mode="HTML",
+        )
         api_bal = await get_tempora_balance()
         if api_bal <= 0.1:
             try: await bot.send_message(ADMINLOG, f"🚨 <b>CRITICAL: TemporaSMS Balance Low! ({api_bal} USDT)</b>", parse_mode="HTML")
             except: pass
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data=f"buy_server3:{item['category']}")]])
-            return await status_msg.edit_text("❌ <b>Server busy. Try later.</b>", parse_mode="HTML", reply_markup=kb)
+            return await status_msg.edit_text("<h2>❌ Server Busy</h2><p>Please try again shortly.</p>", parse_mode="HTML", reply_markup=kb)
 
         safe_max_price = item['max_price_cap']
         price_url = f"{TEMPORASMS_BASE}?api_key={TEMPORASMS_API_KEY}&action=getPricesV3&country={item['country_code']}&service={item['service_code']}&operator={item['operator']}"
@@ -867,7 +1050,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             order_id, phone_number = parts[1], parts[2]
         if not phone_number or not order_id:
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data=f"buy_server3:{item['category']}")]])
-            return await status_msg.edit_text("❌ <b>Out of stock or timed out.</b>", parse_mode="HTML", reply_markup=kb)
+            return await status_msg.edit_text("<h2>❌ Out of Stock</h2><p>No numbers available on this operator right now. Please try another line.</p>", parse_mode="HTML", reply_markup=kb)
 
         new_balance = user.get("balance", 0.0) - inr_price
         users_col.update_one({"_id": user_id}, {"$set": {"balance": new_balance}}, upsert=True)
@@ -882,10 +1065,15 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         kb.row(InlineKeyboardButton(text="🔄 Change Number", callback_data=f"s3_change:{order_id}:{item_id}"), InlineKeyboardButton(text="❌ Cancel", callback_data=f"s3_cancel:{order_id}:{item_id}"))
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data=f"buy_server3:{item['category']}"))
         ui_text = (
-            f"<b>🟢 {cm['name']} Number Allocated</b>\n\n<blockquote>"
-            f"🌍 <b>Country:</b> {item['country_name']}\n📞 <b>Number:</b> <code>{phone_number}</code>\n"
-            f"🏷️ <b>Price:</b> ₹{inr_price:.2f}\n💸 <b>Remaining Balance:</b> ₹{new_balance:.2f}</blockquote>\n"
-            f"<i>⏳ Please wait while we deliver your OTP...</i>\n\n🔒 <b>Security Tip:</b> Use a VPN or proxy while registering."
+            f"<h2>🟢 {cm['emoji']} {cm['name']} Number Allocated</h2>"
+            f"<blockquote>"
+            f"🌍 <b>Country:</b> {item['country_name']}\n"
+            f"📞 <b>Number:</b> <code>{phone_number}</code>\n"
+            f"🏷️ <b>Price:</b> <code>₹{inr_price:.2f}</code>\n"
+            f"💸 <b>Remaining Balance:</b> <code>₹{new_balance:.2f}</code>"
+            f"</blockquote>"
+            f"<p><i>⏳ Waiting for SMS OTP... Auto-polling is active.</i></p>"
+            f"<p>🔒 <b>Security Tip:</b> Use a VPN or proxy matching the region while registering.</p>"
         )
         await status_msg.edit_text(ui_text, parse_mode="HTML", reply_markup=kb.as_markup())
         asyncio.create_task(auto_otp_checker_s3(user_id, order_id, phone_number, item_id, status_msg.message_id))
@@ -928,7 +1116,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         if success:
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_main")]])
             await cq.message.edit_text(
-                f"<b>❌ Order Cancelled</b>\n\n💰 Refunded: ₹{refund_amount:.2f}", 
+                f"<h2>❌ Order Cancelled</h2><blockquote>💰 <b>Refunded:</b> <code>₹{refund_amount:.2f}</code></blockquote>", 
                 parse_mode="HTML", 
                 reply_markup=kb
             )
@@ -941,7 +1129,6 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         order_id, item_id = cq.data.split(":")[1], cq.data.split(":")[2]
         user_id = cq.from_user.id
         
-        # Order fetch karo DB se
         order = orders_col.find_one({"order_id": order_id})
         if not order:
             return await cq.answer("❌ Order not found.", show_alert=True)
@@ -975,9 +1162,9 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         await cq.answer("🔄 Getting a new number...", show_alert=False)
         item = s3_catalog.find_one({"_id": ObjectId(item_id)})
         if not item:
-            return await cq.message.edit_text("❌ Catalog item no longer available.")
+            return await cq.message.edit_text("<h2>❌ Catalog Item Unavailable</h2>", parse_mode="HTML")
             
-        status_msg = await cq.message.edit_text("⏳ <i>Previous number cancelled. Reserving a new one...</i>", parse_mode="HTML")
+        status_msg = await cq.message.edit_text("<h2>⏳ Replacing Number...</h2><p><i>Previous number cancelled. Reserving a new line...</i></p>", parse_mode="HTML")
         
         await srv3_buy_execution(types.CallbackQuery(
             id=cq.id, 
@@ -990,9 +1177,6 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
     # ============================================================
     # ==================  TG (LZT): USER BUY FLOW  ==================
     # ============================================================
-    # ============================================================
-    # ⚙️ USER FILTERS SYSTEM
-    # ============================================================
     DEFAULT_FILTERS = {
         "origin": "any",
         "2fa": "any",
@@ -1004,8 +1188,6 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
     def get_user_filters(user_id):
         user = users_col.find_one({"_id": user_id}) or {}
         saved = user.get("lzt_filters") or {}
-        #
-        # 
         merged = {**DEFAULT_FILTERS, **saved}
         return merged
 
@@ -1028,7 +1210,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         if not page_items:
             kb.row(InlineKeyboardButton(text="🔍 Search Again", callback_data="s3tg_search"))
             kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="s3tg_cpage:0:"))
-            return "📭 <b>No countries matched your search.</b>", kb.as_markup()
+            return "<h2>📭 No Countries Found</h2><p>No countries matched your search query.</p>", kb.as_markup()
 
         for c in page_items:
             btn_text = f"{c['flag']} {c['name']}"
@@ -1052,32 +1234,50 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         )
 
         kb.row(InlineKeyboardButton(text="📋 My Orders", callback_data="s3tg_my_orders"))
-
         kb.row(InlineKeyboardButton(text="🔙 Back to Servers", callback_data="buy"))
 
         text = (
-            "<b>📱 Telegram Accounts — Server (3)</b>\n\n"
-            "<blockquote>🌍 Select a country — live stock and price are fetched instantly when you open it:</blockquote>"
+            f"<h2>{tg_icon()} Telegram Accounts — Server 3</h2>"
+            "<blockquote>🌍 <b>Select a country below:</b>\n"
+            "Live stock and pricing are fetched in real time when you open a region.</blockquote>"
         )
         return text, kb.as_markup()
-    async def send_lzt_countries_message(chat_id):
+
+    async def send_lzt_countries_message(chat_id, category="tg"):
+        if category == "wa":
+            cm = category_meta("wa")
+            pipeline = [{"$match": {"category": "wa"}}, {"$group": {"_id": "$country_code", "name": {"$first": "$country_name"}}}]
+            countries = list(s3_catalog.aggregate(pipeline))
+            kb = InlineKeyboardBuilder()
+            for c in countries:
+                kb.button(text=c['name'], callback_data=f"s3_user_ops:wa:{c['_id']}")
+            kb.adjust(2)
+            kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="back_main"))
+            text = (
+                f"<h2>{cm['emoji']} {cm['name']} Registration [Server 3]</h2>"
+                "<blockquote>🌍 <b>Select a Region Below:</b></blockquote>"
+                "<p><i>⚡ Instant automated SMS OTP delivery with auto-refund protection.</i></p>"
+            )
+            try:
+                await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb.as_markup())
+            except Exception:
+                pass
+            return
         text, markup = build_country_page(0)
-        try: await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
-        except Exception: pass
+        try:
+            await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            pass
 
     # ============================================================
     # 🎛️ FILTER MENU & TOGGLES
     # ============================================================
     async def _render_filters_menu(cq: CallbackQuery):
-        """Actual filter menu rendering — no lock-check here so it can be
-        safely called again right after a toggle/reset without getting
-        blocked by the just-set debounce lock."""
         user_id = cq.from_user.id
         f = get_user_filters(user_id)
 
         kb = InlineKeyboardBuilder()
 
-        # Labels for toggles
         origin_labels = {"any": "Any", "autoreg": "Autoreg 🤖", "phishing": "Phishing 🎣", "resale": "Resale 🔄"}
         tfa_labels = {"any": "Any", "0": "No 🔓", "1": "Yes 🔐"}
         prem_labels = {"any": "Any", "no": "No ❌", "yes": "Yes 🌟"}
@@ -1094,9 +1294,9 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="s3tg_open"))
 
         text = (
-            "⚙️ <b><u>Search Filters</u></b>\n\n"
-            "<blockquote>Configure what types of accounts you want to see in the list.\n"
-            "Tap a button to switch options (Any ➔ Yes ➔ No).</blockquote>"
+            "<h2>⚙️ Search Filters</h2>"
+            "<blockquote>Configure what types of Telegram accounts you want to see in the catalog.\n"
+            "Tap any filter button below to cycle options (<b>Any ➔ Yes ➔ No</b>).</blockquote>"
         )
         await cq.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
@@ -1128,7 +1328,6 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         if await is_locked_for_user(cq): return
         users_col.update_one({"_id": cq.from_user.id}, {"$set": {"lzt_filters": DEFAULT_FILTERS}}, upsert=True)
         await cq.answer("✅ Filters Reset to Default!", show_alert=False)
-
         await _render_filters_menu(cq)
 
     # ============================================================
@@ -1142,27 +1341,26 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         user_id = cq.from_user.id
         user_data = users_col.find_one({"_id": user_id}) or {}
         
-        # 🕒 24-Hour Timer Logic
         last_accepted = user_data.get("s3_tc_accepted_at", 0)
         current_time = time.time()
         
-        if current_time - last_accepted > 86400: # 86400 seconds = 24 hours
+        if current_time - last_accepted > 86400:
             text = (
-                "🚨 <b><u>Server 3: Terms & Conditions</u></b> 🚨\n\n"
-                "<i>Please read carefully before accessing the Telegram Market:</i>\n\n"
+                f"<h2>🚨 {tg_icon()} Server 3: Terms & Conditions</h2>"
+                "<p><i>Please read carefully before accessing the Telegram Market:</i></p>"
                 "<blockquote>"
-                "🎣 <b>Account Quality:</b> These are cheap automated/phishing accounts. Buy at your own risk. The bot is not responsible for random logouts.\n"
-                "📨 <b>OTP Policy:</b> On some accounts, the OTP simply does not arrive. This is expected behavior for this category. <b>No refunds</b> for missing OTPs.\n"
-                "❄️ <b>Limits & Bans:</b> Accounts are fresh. We are not responsible for any limitations, bans, or freezes after successful login.\n"
-                "⚙️ <b>Filters & Health:</b> Use the <b>⚙️ Filters</b> button to sort by Premium, 2FA, Email, etc. The bot automatically checks account health right before purchase to protect your funds!\n"
-                "🚫 <b>Refund Policy:</b> All sales are final. No refunds after a successful purchase."
-                "</blockquote>\n\n"
-                "<i>⚠️ By clicking 'I Agree', you accept these terms. (This message appears once every 24 hours).</i>"
+                "🎣 <b>Account Origin:</b> Automated/market accounts — buy at your own risk.\n"
+                "📨 <b>OTP Policy:</b> On some accounts, OTP may not arrive. <b>No refunds</b> for missing OTPs.\n"
+                "❄️ <b>Limits & Bans:</b> We are not responsible for limitations, freezes, or bans after login.\n"
+                "⚙️ <b>Filters & Health Check:</b> Use <b>⚙️ Filters</b> to sort by Premium, 2FA, Email, and Spam status. Account health is verified automatically right before purchase!\n"
+                "🚫 <b>Final Sale:</b> All sales are final once purchased."
+                "</blockquote>"
+                "<p><i>⚠️ Tap <b>I Agree & Continue</b> to accept (shown once every 24 hours).</i></p>"
             )
             
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✅ I Agree & Continue", callback_data="s3tg_accept_tc")],
-                [InlineKeyboardButton(text="🔙 Cancel", callback_data="buy")] #main menu
+                [InlineKeyboardButton(text="🔙 Cancel", callback_data="buy")]
             ])
             return await cq.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
@@ -1172,14 +1370,11 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
     @dp.callback_query(F.data == "s3tg_accept_tc")
     async def s3tg_accept_tc(cq: CallbackQuery):
         user_id = cq.from_user.id
-        
         users_col.update_one(
             {"_id": user_id}, 
             {"$set": {"s3_tc_accepted_at": time.time()}}, 
             upsert=True
         )
-        
-        # ✅ 
         text, markup = build_country_page(0)
         await cq.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
 
@@ -1193,7 +1388,12 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
     @dp.callback_query(F.data == "s3tg_search")
     async def s3tg_search(cq: CallbackQuery, state: FSMContext):
         await state.set_state(UserSearch.waiting_country_query)
-        await cq.message.edit_text("🔍 <b>Type a country name to search:</b>", parse_mode="HTML")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="s3tg_open")]])
+        await cq.message.edit_text(
+            "<h2>🔍 Search Country</h2><blockquote>Type a country name or ISO code to filter the Server 3 catalog:</blockquote>",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
         await cq.answer()
 
     @dp.message(StateFilter(UserSearch.waiting_country_query))
@@ -1210,11 +1410,10 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
     async def s3tg_listings(cq: CallbackQuery):
         _, country_code, vpage = cq.data.split(":")
         vpage = int(vpage)
-        await cq.message.edit_text("🔎 <i>Fetching live listings... ⏳</i>", parse_mode="HTML")
+        await cq.message.edit_text("<h2>🔎 Fetching Live Listings...</h2><p><i>Querying real-time stock from Server 3...</i></p>", parse_mode="HTML")
 
         lzt_page = (vpage // 4) + 1
 
-        # ⚙️ USER FILTERS APPLY
         f = get_user_filters(cq.from_user.id)
         search_params = {
             "country[]": country_code,
@@ -1241,7 +1440,11 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             errs = data.get("errors", ["Unknown error"]) if isinstance(data, dict) else ["Unknown error"]
             await log_admin(f"⚠️ <b>LZT Search Failed</b> (status {status}): {'; '.join(errs)}", data)
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="s3tg_open")]])
-            return await cq.message.edit_text(f"❌ <b>Could not fetch listings.</b>\n<i>{escape('; '.join(errs))}</i>", parse_mode="HTML", reply_markup=kb)
+            return await cq.message.edit_text(
+                f"<h2>❌ Could Not Fetch Listings</h2><blockquote><code>{escape('; '.join(errs))}</code></blockquote>",
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
 
         all_items = data["items"]
         start_index = (vpage % 4) * LZT_PER_PAGE
@@ -1249,14 +1452,18 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
 
         if not page_items and vpage == 0:
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="s3tg_open")]])
-            return await cq.message.edit_text("📭 <b>No accounts available in this region right now.</b>", parse_mode="HTML", reply_markup=kb)
+            return await cq.message.edit_text(
+                "<h2>📭 Out of Stock</h2><p>No accounts match your current filters in this region right now.</p>",
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
 
         country_meta = next((c for c in LZT_ALL_COUNTRIES if c['code'] == country_code), {"flag": "🌍", "name": country_code})
 
         kb = InlineKeyboardBuilder()
         for item in page_items:
             usd_price = item["price"]
-            sell_price = usd_to_sell_inr(usd_price)
+            sell_price = usd_to_sell_inr(usd_price, cq.from_user.id)
             kb.button(text=f"{country_meta['flag']} ₹{sell_price:.0f}", callback_data=f"s3tg_view:{item['item_id']}:{usd_price}:{country_code}:{vpage}")
         kb.adjust(2)
 
@@ -1270,7 +1477,12 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             
         kb.row(InlineKeyboardButton(text="🔄 Refresh", callback_data=f"s3tg_country:{country_code}:{vpage}"), InlineKeyboardButton(text="🔙 Back", callback_data="s3tg_open"))
 
-        text = f"<b>📱 TG Accounts — {country_meta['name']}</b>\n\n<blockquote>🛒 Showing {len(page_items)} accounts. Tap to buy 👇</blockquote>"
+        disc = get_user_discount(cq.from_user.id)
+        disc_line = f"\n🏷️ <b>VIP Discount Active:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
+        text = (
+            f"<h2>{tg_icon()} TG Accounts — {country_meta['flag']} {country_meta['name']}</h2>"
+            f"<blockquote>🛒 Showing <b>{len(page_items)}</b> live accounts on this page. Tap an account below to preview & buy:{disc_line}</blockquote>"
+        )
         await cq.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
 
@@ -1279,7 +1491,6 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
     # ==============================
     @dp.callback_query(F.data.startswith("s3tg_view:"))
     async def s3tg_view(cq: CallbackQuery):
-        # 🔒 1. User Lock Check
         if await is_locked_for_user(cq): return  
     
         parts = cq.data.split(":")
@@ -1288,24 +1499,26 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         country_code = parts[3]
         vpage = parts[4]
     
-        sell_price = usd_to_sell_inr(usd_price)
+        sell_price = usd_to_sell_inr(usd_price, cq.from_user.id)
+        disc = get_user_discount(cq.from_user.id)
     
-        # 💰 User Balance
         user = users_col.find_one({"_id": cq.from_user.id}) or {}
         balance = user.get("balance", 0.0)
     
-        status_msg = await cq.message.edit_text("⏳ <i>Fetching live account details from server...</i>", parse_mode="HTML")
+        status_msg = await cq.message.edit_text("<h2>⏳ Loading Account Preview...</h2><p><i>Fetching live account details from Server 3...</i></p>", parse_mode="HTML")
     
-        # 🌐 2. LZT API Fetch
         status, data = await lzt_request("GET", f"{LZT_BASE}/{item_id}", action_label=f"LZT: Item Detail ({item_id})")
     
         if status != 200 or "item" not in data:
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to List", callback_data=f"s3tg_country:{country_code}:{vpage}")]])
-            return await status_msg.edit_text("❌ <b>Oops! This account is no longer available.</b>\n<i>Someone else might have bought it, or the seller removed it.</i>", parse_mode="HTML", reply_markup=kb)
+            return await status_msg.edit_text(
+                "<h2>❌ Account Unavailable</h2><p><i>Someone else just purchased this account or the listing was removed.</i></p>",
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
         
         item = data["item"]
     
-        # 🧩 3. Data Extraction
         country_meta = next((c for c in LZT_ALL_COUNTRIES if c['code'] == country_code), {"flag": "🌍", "name": country_code})
     
         origin_raw = item.get("item_origin", "Unknown")
@@ -1314,8 +1527,6 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
     
         password_set = "Yes 🔐" if item.get("telegram_password") == 1 else "No 🔓"
         premium = "Yes 🌟" if item.get("telegram_premium") == 1 else "No ❌"
-    
-        # 📧 NAYA: Email Check
         email_linked = "Yes 📧" if item.get("telegram_email") == 1 else "No ❌"
     
         contacts = item.get("telegram_contacts_count", 0)
@@ -1325,35 +1536,29 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         spam_status = "✅ <code>Clean</code>" if spam_block == -1 else "🚫 <code>Limited</code>"
     
         last_seen = format_time_ago(item.get("telegram_last_seen"))
-    
-        # 🌟 4. VIP Extraction
         login_type = str(item.get("login_type", "Unknown")).capitalize()
         dc_id = item.get("telegram_dc_id", "Unknown")
+        disc_line = f"\n🏷️ <b>VIP Discount:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
     
-        # 🎨 5. VIP UI Formatting (Added Email)
         text = (
-            f"✨ <b><u>Account Preview</u></b> ✨\n"
-            f"<blockquote>🌍 <b>{country_meta['flag']} {country_meta['name']}</b> (<code>{country_code}</code>)</blockquote>\n"
-        
-            f"💰 <b>Price:</b> <code>₹{sell_price:.0f}</code>\n"
-            f"💎 <b>Your Balance:</b> <code>₹{balance:.2f}</code>\n\n"
-        
-            f"📱 <b><u>Account Info:</u></b>\n"
-            f"┣ <b>Origin:</b> <i>{origin}</i>\n"
-            f"┣ <b>Login Type:</b> <code>{login_type}</code>\n"
-            f"┣ <b>Data Center:</b> <code>DC {dc_id}</code>\n"
-            f"┣ <b>Premium:</b> {premium} | <b>2FA:</b> {password_set}\n"
-            f"┣ <b>Attached Email:</b> {email_linked}\n"
-            f"┗ <b>Contacts:</b> <code>{contacts}</code> | <b>Chats:</b> <code>{chats}</code>\n\n"
-        
-            f"🛡 <b><u>Security Status:</u></b>\n"
-            f"┣ <b>Spam Status:</b> {spam_status}\n"
-            f"┗ <b>Last Active:</b> <i>{last_seen}</i>\n\n"
-        
-            f"⚠️ <u>Note:</u> These are automated accounts. <b>No refunds</b> after OTP delivery. Please review details carefully."
+            f"<h2>✨ {tg_icon()} Account Preview</h2>"
+            f"<blockquote>"
+            f"🌍 <b>{country_meta['flag']} {country_meta['name']}</b> (<code>{country_code}</code>)\n"
+            f"💰 <b>Price:</b> <code>₹{sell_price:.0f}</code>  •  💎 <b>Your Balance:</b> <code>₹{balance:.2f}</code>{disc_line}"
+            f"</blockquote>"
+            f"<p><b>📋 Account Specifications:</b></p>"
+            f"<blockquote>"
+            f"• <b>Origin:</b> <i>{origin}</i>\n"
+            f"• <b>Login Type:</b> <code>{login_type}</code>  •  <b>Data Center:</b> <code>DC {dc_id}</code>\n"
+            f"• <b>Premium:</b> {premium}  •  <b>2FA:</b> {password_set}\n"
+            f"• <b>Attached Email:</b> {email_linked}\n"
+            f"• <b>Contacts:</b> <code>{contacts}</code>  •  <b>Chats:</b> <code>{chats}</code>\n"
+            f"• <b>Spam Status:</b> {spam_status}\n"
+            f"• <b>Last Active:</b> <i>{last_seen}</i>"
+            f"</blockquote>"
+            f"<p>⚠️ <i>Automated market account — health is verified before purchase. All sales are final.</i></p>"
         )
     
-        # 🛒 6. Keyboard Buttons
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text="✅ Accept & Buy", callback_data=f"s3tg_buy:{item_id}:{usd_price}:{country_code}"))
         kb.row(InlineKeyboardButton(text="🔙 Go Back", callback_data=f"s3tg_country:{country_code}:{vpage}"))
@@ -1362,7 +1567,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
 
     async def find_exact_replacement(country_code, exact_usd_price, user_id, exclude_ids=None):
         exclude_ids = exclude_ids or set()
-        f = get_user_filters(user_id) # 👈 Filter fetch karega
+        f = get_user_filters(user_id)
 
         params = {
             "country[]": country_code,
@@ -1395,15 +1600,14 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         
         await cq.answer("🔄 Searching stock...", show_alert=False)
         
-        status_msg = await cq.message.edit_text("⏳ <i>Searching for another account at the exact same price...</i>", parse_mode="HTML")
+        status_msg = await cq.message.edit_text("<h2>⏳ Searching Stock...</h2><p><i>Looking for another account at the exact same price...</i></p>", parse_mode="HTML")
         new_item_id = await find_exact_replacement(country_code, usd_price, cq.from_user.id)
         
         if not new_item_id:
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to Menu", callback_data="s3tg_open")]])
-            return await status_msg.edit_text("❌ <b>Out of stock!</b> No accounts left at this exact price for this country.", parse_mode="HTML", reply_markup=kb)
+            return await status_msg.edit_text("<h2>❌ Out of Stock</h2><p>No accounts left at this exact price for this country.</p>", parse_mode="HTML", reply_markup=kb)
             
         new_cq = cq.model_copy(update={"data": f"s3tg_buy:{new_item_id}:{usd_price}:{country_code}"})
-        
         await s3tg_buy(new_cq, external_status_msg=status_msg)
 
     @dp.callback_query(F.data.startswith("s3tg_buy:"))
@@ -1413,8 +1617,8 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         usd_price = float(parts[2])
         country_code = parts[3]
         
-        sell_price = usd_to_sell_inr(usd_price)
         user_id = cq.from_user.id
+        sell_price = usd_to_sell_inr(usd_price, user_id)
         
         first_name = cq.from_user.first_name or "User"
         username_str = f"@{cq.from_user.username}" if cq.from_user.username else f"<a href='tg://user?id={user_id}'>{first_name}</a>"
@@ -1427,12 +1631,18 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             kb.button(text="💳 Recharge", callback_data="recharge")
             kb.button(text="🔙 Back", callback_data="s3tg_open")
             kb.adjust(1)
-            msg_text = f"<b>❌ Insufficient Balance!</b>\n\n<blockquote>Required: ₹{sell_price:.2f}\nAvailable: ₹{balance:.2f}</blockquote>"
+            msg_text = (
+                f"<h2>❌ Insufficient Balance</h2>"
+                f"<blockquote>"
+                f"🏷️ <b>Required:</b> <code>₹{sell_price:.2f}</code>\n"
+                f"💳 <b>Available:</b> <code>₹{balance:.2f}</code>"
+                f"</blockquote>"
+            )
             if external_status_msg:
                 return await external_status_msg.edit_text(msg_text, parse_mode="HTML", reply_markup=kb.as_markup())
             return await cq.message.edit_text(msg_text, parse_mode="HTML", reply_markup=kb.as_markup())
 
-        status_msg = external_status_msg or await cq.message.edit_text("⏳ <i>Checking account health & processing...</i>", parse_mode="HTML")
+        status_msg = external_status_msg or await cq.message.edit_text("<h2>⏳ Verifying Account...</h2><p><i>Checking account health & processing purchase...</i></p>", parse_mode="HTML")
 
         target_item_id = item_id
         tried_ids = set()
@@ -1446,7 +1656,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
 
             try:
                 await status_msg.edit_text(
-                    f"⏳ <i>Checking account health... (attempt {attempt}/{MAX_ATTEMPTS})</i>",
+                    f"<h2>⏳ Verifying Account Health</h2><p><i>Checking account... (attempt {attempt}/{MAX_ATTEMPTS})</i></p>",
                     parse_mode="HTML"
                 )
             except Exception:
@@ -1461,7 +1671,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
                     break
                 try:
                     await status_msg.edit_text(
-                        f"⚠️ <i>That account is unavailable, searching another at the same price... (attempt {attempt}/{MAX_ATTEMPTS})</i>",
+                        f"<h2>⚠️ Finding Replacement...</h2><p><i>That account was unhealthy, searching another at the same price... ({attempt}/{MAX_ATTEMPTS})</i></p>",
                         parse_mode="HTML"
                     )
                 except Exception:
@@ -1476,7 +1686,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             buy_url = f"{LZT_BASE}/{target_item_id}/fast-buy"
             body = {
                 "price": usd_price,
-                "buy_without_validation": 1  #
+                "buy_without_validation": 1
             }
             
             b_status, b_data = await lzt_request("POST", buy_url, json_body=body, action_label=f"LZT: Fast Buy ({target_item_id})")
@@ -1493,12 +1703,12 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
                     break
                 try:
                     await status_msg.edit_text(
-                        f"⚠️ <i>Purchase failed on that account, trying another... (attempt {attempt}/{MAX_ATTEMPTS})</i>",
+                        f"<h2>⚠️ Retrying Purchase...</h2><p><i>Trying another account at the same price... ({attempt}/{MAX_ATTEMPTS})</i></p>",
                         parse_mode="HTML"
                     )
                 except Exception:
                     pass
-                replacement = await find_exact_replacement(country_code, usd_price, exclude_ids=tried_ids)
+                replacement = await find_exact_replacement(country_code, usd_price, user_id, exclude_ids=tried_ids)
                 if not replacement:
                     errs = b_data.get("errors", ["Unknown"]) if isinstance(b_data, dict) else ["Unknown"]
                     error_text = "; ".join(errs)
@@ -1508,7 +1718,11 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         if not purchase_successful:
             await log_admin(f"⚠️ <b>LZT Purchase Failed (After {MAX_ATTEMPTS} Failover Attempts)</b>\n\n👤 <b>User:</b> {username_str} (<code>{user_id}</code>)\n🆔 <b>Last Tried Item:</b> {target_item_id}\n❌ <b>Error:</b> {error_text}")
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="s3tg_open")]])
-            return await status_msg.edit_text(f"❌ <b>Purchase failed after {MAX_ATTEMPTS} attempts</b> at this exact price. Please try a different account.", parse_mode="HTML", reply_markup=kb)
+            return await status_msg.edit_text(
+                f"<h2>❌ Purchase Failed</h2><p>Could not complete purchase after {MAX_ATTEMPTS} failover attempts at this exact price. Please try another listing.</p>",
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
             
         raw_phone = item_data.get("telegram_phone") or item_data.get("login") or "N/A"
         phone_number = str(raw_phone)
@@ -1525,17 +1739,14 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             "user_id": user_id, "item_id": str(target_item_id), "title": item_data.get("title_en") or item_data.get("title"),
             "price_usd": usd_price, "price_inr": sell_price, "number": phone_number,
             "country_code": country_code, "country_name": country_display_name, "server": 3, "status": "delivered", "created_at": datetime.utcnow(),
-            "channel_logged": False  # 🚀 
+            "channel_logged": False
         })
 
         reset_success = False
         try:
-            await status_msg.edit_text("⏳ <i>Securing account (Terminating other sessions)...</i>", parse_mode="HTML")
+            await status_msg.edit_text("<h2>🛡️ Securing Account...</h2><p><i>Terminating other sessions...</i></p>", parse_mode="HTML")
             reset_url = f"{LZT_BASE}/{target_item_id}/telegram-reset-authorizations"
-            # LZT API se status capture karenge
             r_status, r_data = await lzt_request("POST", reset_url, action_label=f"LZT: Auto Reset Auth ({target_item_id})")
-            
-            # Agar status 200 aaya, matlab kick successful ho gaya
             if r_status == 200:
                 reset_success = True
         except Exception:
@@ -1545,30 +1756,32 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         kb.row(InlineKeyboardButton(text="📋 Copy Number", copy_text=CopyTextButton(text=phone_number)))
         kb.row(InlineKeyboardButton(text="📩 Get Login Code", callback_data=f"s3tg_getcode:{target_item_id}:{country_code}:{usd_price}"))
 
-        security_msg = "\n\n🛡️ <i>Account secured! Other sessions terminated.</i>" if reset_success else ""
+        security_msg = "<p>🛡️ <i>Account secured! Other sessions were terminated.</i></p>" if reset_success else ""
 
         success_text = (
-            f"<pre>✅ Purchased Successfully!</pre>\n"
-            f"➖ <b><u>Server</u></b>: Server 3 (Telegram)\n"
-            f"➖ <b><u>Country</u></b>: {country_display_name}\n"
+            f"<h2>✅ {tg_icon()} Purchased Successfully!</h2>"
+            f"<blockquote>"
+            f"🌐 <b>Server:</b> Server 3 (Telegram)\n"
+            f"🌍 <b>Country:</b> {country_display_name}\n"
             f"📞 <b>Number:</b> <code>{phone_number}</code>\n"
-            f"🏷️ <b>Price:</b> ₹{sell_price:.2f}\n"
-            f"💸<b> Balance:</b> ₹{new_balance:.2f}"
-            f"{security_msg}"  # 🚀
+            f"🏷️ <b>Price:</b> <code>₹{sell_price:.2f}</code>\n"
+            f"💸 <b>Balance:</b> <code>₹{new_balance:.2f}</code>"
+            f"</blockquote>"
+            f"{security_msg}"
         )
         await status_msg.edit_text(success_text, parse_mode="HTML", reply_markup=kb.as_markup())
 
-        # ✅ Success Admin Log 
         await log_admin(
-            f"🆕 <b>LZT Account Sold (Server 3 - Telegram)</b>\n\n"
+            f"<h2>🆕 LZT Account Sold (Server 3 - Telegram)</h2>"
+            f"<blockquote>"
             f"👤 <b>User:</b> {username_str} (<code>{user_id}</code>)\n"
-            f"🆔 <b>Final Item ID:</b> <code>{target_item_id}</code>\n"
+            f"🆔 <b>Item ID:</b> <code>{target_item_id}</code>\n"
             f"🌍 <b>Country:</b> {country_display_name} ({country_code})\n"
-            f"💰 <b>Cost (LZT):</b> ${usd_price:.2f}\n"
-            f"💵 <b>Sold For:</b> ₹{sell_price:.2f}\n"
-            f"🏦 <b>Remaining Balance:</b> ₹{new_balance:.2f}\n"  # 👽 NAYA: User ka bacha hua balance
-            f"📞 <b>Number:</b> <code>{phone_number}</code>\n"
-            f"ℹ️ <i>If failovers were used, this was the successful item.</i>"
+            f"💰 <b>Cost (LZT):</b> <code>${usd_price:.2f}</code>\n"
+            f"💵 <b>Sold For:</b> <code>₹{sell_price:.2f}</code>\n"
+            f"🏦 <b>Remaining Balance:</b> <code>₹{new_balance:.2f}</code>\n"
+            f"📞 <b>Number:</b> <code>{phone_number}</code>"
+            f"</blockquote>"
         )
 
     @dp.callback_query(F.data.startswith("s3tg_getcode:"))
@@ -1585,7 +1798,11 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
 
         if status != 200:
             errs = data.get("errors", ["Unknown"]) if isinstance(data, dict) else ["Unknown"]
-            return await bot.send_message(cq.from_user.id, f"❌ Could not fetch login code yet: {'; '.join(errs)}\nTry again in a few seconds.")
+            return await bot.send_message(
+                cq.from_user.id,
+                f"<h2>⏳ Login Code Not Ready</h2><blockquote><code>{escape('; '.join(errs))}</code></blockquote><p><i>Request the code in Telegram first, then tap <b>Get Login Code</b> again in a few seconds.</i></p>",
+                parse_mode="HTML",
+            )
 
         code = None
         if 'codes' in data:
@@ -1601,13 +1818,16 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
 
         if not code:
             await log_admin(f"⚠️ <b>Could not parse login code — check raw response</b>\nItem: {item_id}", data)
-            return await bot.send_message(cq.from_user.id, "⚠️ Code received but couldn't be read automatically. Please contact support.")
+            return await bot.send_message(
+                cq.from_user.id,
+                "<h2>⚠️ Code Parsing Issue</h2><p>Code was received but couldn't be read automatically. Please contact support.</p>",
+                parse_mode="HTML",
+            )
 
         lzt_orders.update_one({"item_id": str(item_id)}, {"$set": {"status": "completed", "otp": code}})
         
         order_info = lzt_orders.find_one({"item_id": str(item_id)})
         phone_number = order_info.get("number") if order_info else None
-        
         already_logged = order_info.get("channel_logged", False) if order_info else False
         
         if not phone_number or phone_number == "Unknown":
@@ -1632,14 +1852,16 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
 
         if not already_logged:
             channel_message = (
-                f"<pre><u>✅ <b>New Number Purchase Successful</b></u></pre>\n\n"
-                f"➖ <b><u>Country:</u></b> {country_display_name}\n"
-                f"➖ <b><u>Application:</u> Теlegгам 🍷</b>\n\n"
-                f"➕ <b>Number: {masked_number} 📞</b>\n"
-                f"➕ <b>OTP:</b> <span class='tg-spoiler'>{code}</span> 💬\n"
-                f"➕ <b>Server:</b> (3) 🥂\n"
-                f"➕ <b>Password:</b> <span class='tg-spoiler'>{password_text}</span> 🔐\n\n"
-                f"<b>• @{BOTUSER} || @{CHANNEL}</b>"
+                f"<h2>✅ New Number Purchase Successful</h2>"
+                f"<blockquote>"
+                f"🌍 <b>Country:</b> {country_display_name}\n"
+                f"{tg_icon()} <b>Application:</b> Telegram\n"
+                f"📞 <b>Number:</b> <code>{masked_number}</code>\n"
+                f"🔑 <b>OTP:</b> <span class='tg-spoiler'>{code}</span>\n"
+                f"🌐 <b>Server:</b> (3)\n"
+                f"🔐 <b>Password:</b> <span class='tg-spoiler'>{password_text}</span>"
+                f"</blockquote>"
+                f"<p><b>• @{BOTUSER} || @{CHANNEL}</b></p>"
             )
             
             buy_button = InlineKeyboardMarkup(
@@ -1653,26 +1875,28 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
                 pass
 
         success_text = (
-            f"<pre>Order Completed ✅</pre>\n"
-            f"✅ 𝐍𝗨𝐌𝐁𝐄𝐑 - <code>{phone_number}</code>\n"
-            f"💬 𝐂𝐎𝐃𝐄 - <code>{code}</code>\n"
-            f"💬 𝐏𝐀𝐒𝐒 - <code>{password_text}</code>\n"
+            f"<h2>✅ {tg_icon()} Order Completed</h2>"
+            f"<blockquote>"
+            f"📞 <b>Number:</b> <code>{phone_number}</code>\n"
+            f"🔑 <b>OTP Code:</b> <code>{code}</code>\n"
+            f"🔐 <b>2FA Password:</b> <code>{password_text}</code>"
+            f"</blockquote>"
         )
 
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="Copy OTP", copy_text=CopyTextButton(text=code)),
-                    InlineKeyboardButton(text="Copy Pass", copy_text=CopyTextButton(text=password_text))
+                    InlineKeyboardButton(text="📋 Copy OTP", copy_text=CopyTextButton(text=code)),
+                    InlineKeyboardButton(text="🔐 Copy Pass", copy_text=CopyTextButton(text=password_text))
                 ],
                 [
-                    InlineKeyboardButton(text="• Get Code Again •", callback_data=f"s3tg_getcode:{item_id}:{country_code}:{usd_price}")
+                    InlineKeyboardButton(text="🔄 Get Code Again", callback_data=f"s3tg_getcode:{item_id}:{country_code}:{usd_price}")
                 ],
                 [
                     InlineKeyboardButton(text="🚫 Remove Bot Devices", callback_data=f"s3tg_reset:{item_id}")
                 ],
                 [
-                    InlineKeyboardButton(text=f"🔄 Buy Again ({country_display_name})", callback_data=f"s3tg_buy_again:{country_code}:{usd_price}")
+                    InlineKeyboardButton(text=f"🛒 Buy Again ({country_display_name})", callback_data=f"s3tg_buy_again:{country_code}:{usd_price}")
                 ]
             ]
         )
@@ -1694,7 +1918,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         status, data = await lzt_request("POST", reset_url, action_label=f"LZT: Reset Auth ({item_id})")
 
         if status == 200:
-            success_text = "✅ <b>Bot session has been logged out!</b>\nOther devices kicked successfully."
+            success_text = "<h2>✅ Sessions Terminated</h2><blockquote>Bot session has been logged out and other devices were kicked.</blockquote>"
             await cq.message.answer(success_text, parse_mode="HTML")
         else:
             err_msg = "Unknown Error"
@@ -1702,9 +1926,9 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
                 err_msg = data["errors"][0]
                 
             if "Too new authorization" in err_msg:
-                error_text = "⚠️ <b>Telegram Security Limit!</b>\n\nWait at least 24 hours after login before kicking other devices."
+                error_text = "<h2>⚠️ Telegram Security Limit</h2><blockquote>Please wait at least 24 hours after login before terminating other sessions.</blockquote>"
             else:
-                error_text = f"❌ <b>Failed to logout:</b>\n<code>{err_msg}</code>"
+                error_text = f"<h2>❌ Failed to Terminate Sessions</h2><blockquote><code>{escape(str(err_msg))}</code></blockquote>"
                 
             await cq.message.answer(error_text, parse_mode="HTML")
 
@@ -1714,10 +1938,14 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         
         if not orders:
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="s3tg_open")]])
-            return await cq.message.edit_text("📭 <b>You don't have any recent Telegram orders.</b>", parse_mode="HTML", reply_markup=kb)
+            return await cq.message.edit_text(
+                "<h2>📭 No Recent Orders</h2><p>You don't have any recent Server 3 Telegram orders yet.</p>",
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
             
         kb = InlineKeyboardBuilder()
-        text = "<b>📋 Your Recent Orders (Server 3):</b>\n<i>You can request OTP if the session is still active!</i>\n\n"
+        lines = []
         
         for idx, o in enumerate(orders, 1):
             number = o.get("number", "Unknown")
@@ -1725,60 +1953,79 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             item_id = o.get("item_id")
             usd_price = o.get("price_usd", 0)
             
-            text += f"<b>{idx}. {country}</b> ➔ <code>{number}</code>\n"
-            
-            # Har order ke liye alag OTP button
+            lines.append(f"<b>{idx}. {country}</b> ➔ <code>{number}</code>")
             kb.row(InlineKeyboardButton(text=f"📩 Get OTP ({number})", callback_data=f"s3tg_getcode:{item_id}:{o.get('country_code')}:{usd_price}"))
             
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="s3tg_open"))
-        
+        text = (
+            f"<h2>📋 Your Recent Orders (Server 3)</h2>"
+            f"<blockquote>" + "\n".join(lines) + "</blockquote>"
+            f"<p><i>Tap an order below to request a new login OTP if the session is still active:</i></p>"
+        )
         await cq.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
+
+    async def _render_lzt_balance(target, edit: bool = False):
+        if edit:
+            checking = await target.edit_text("<h2>🔄 Fetching LZT Profile...</h2><p><i>Querying live LZT Market balance & Server 3 sales...</i></p>", parse_mode="HTML")
+        else:
+            checking = await target.answer("<h2>🔄 Fetching LZT Profile...</h2><p><i>Querying live LZT Market balance & Server 3 sales...</i></p>", parse_mode="HTML")
+
+        status, data = await lzt_request("GET", LZT_ME_URL, action_label="LZT: Get Balance")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Server 3 Manager", callback_data="s3m_home")],
+            [InlineKeyboardButton(text="⬅️ Admin Panel", callback_data="admin_refresh")],
+            [InlineKeyboardButton(text="❌ Close", callback_data="delete_msg")],
+        ])
+
+        if status != 200 or "user" not in data:
+            errs = data.get("errors", ["Unknown API Error"]) if isinstance(data, dict) else ["Unknown API Error"]
+            return await checking.edit_text(
+                f"<h2>❌ Failed to Fetch LZT Profile</h2><blockquote><code>{escape('; '.join(errs))}</code></blockquote>",
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+
+        user_data = data["user"]
+        username = user_data.get("username", "Unknown")
+        user_id = user_data.get("user_id", "N/A")
+        balance_usd = user_data.get("convertedBalance", 0.00)
+        balance_rub = user_data.get("balance", "0.00")
+        hold_rub = user_data.get("hold", "0.00")
+
+        s3_sales = list(lzt_orders.find({"server": 3, "status": {"$in": ["delivered", "completed", "purchased"]}}))
+        total_s3_sold = len(s3_sales)
+        total_inr_earned = sum(o.get("price_inr", 0) for o in s3_sales)
+        total_usd_spent = sum(o.get("price_usd", 0) for o in s3_sales)
+
+        text = (
+            f"<h2>📊 LZT Market Admin Dashboard</h2>"
+            f"<blockquote>"
+            f"👤 <b>Account:</b> <code>{username}</code> (ID: <code>{user_id}</code>)\n"
+            f"💵 <b>Available USD:</b> <code>${balance_usd}</code>\n"
+            f"🇷🇺 <b>Available RUB:</b> <code>₽{balance_rub}</code>\n"
+            f"🔒 <b>Funds on Hold:</b> <code>₽{hold_rub}</code>"
+            f"</blockquote>"
+            f"<p><b>🤖 Server 3 Bot Sales Summary:</b></p>"
+            f"<blockquote>"
+            f"🛍️ <b>Total Accounts Sold:</b> <code>{total_s3_sold}</code>\n"
+            f"📈 <b>Total INR Earned:</b> <code>₹{total_inr_earned:.2f}</code>\n"
+            f"📉 <b>Total LZT Spent:</b> <code>${total_usd_spent:.2f}</code>"
+            f"</blockquote>"
+        )
+        await checking.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
     @dp.message(Command("lztbalance"))
     async def cmd_lzt_balance(msg: Message):
         if not is_admin(msg.from_user.id): 
-            return await msg.answer("❌ Unauthorized.")
-        
-        checking = await msg.answer("🔄 <i>Fetching live LZT Market Profile...</i>", parse_mode="HTML")
-        
-        status, data = await lzt_request("GET", LZT_ME_URL, action_label="LZT: Get Balance")
-        
-        if status != 200 or "user" not in data:
-            errs = data.get("errors", ["Unknown API Error"]) if isinstance(data, dict) else ["Unknown API Error"]
-            return await checking.edit_text(f"❌ <b>Failed to fetch LZT Profile:</b>\n<code>{'; '.join(errs)}</code>", parse_mode="HTML")
-            
-        user_data = data["user"]
-        
-        # 👤 User Info
-        username = user_data.get("username", "Unknown")
-        user_id = user_data.get("user_id", "N/A")
-        
-        balance_usd = user_data.get("convertedBalance", 0.00)
-        balance_rub = user_data.get("balance", "0.00")
-        hold_rub = user_data.get("hold", "0.00")
-        
-        s3_sales = list(lzt_orders.find({"server": 3, "status": {"$in": ["delivered", "completed", "purchased"]}}))
-        
-        total_s3_sold = len(s3_sales)
-        total_inr_earned = sum(o.get("price_inr", 0) for o in s3_sales)
-        total_usd_spent = sum(o.get("price_usd", 0) for o in s3_sales)
-        
-        text = (
-            f"<b>📊 LZT Market Admin Dashboard</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 <b>Account:</b> <code>{username}</code> (ID: {user_id})\n\n"
-            f"💵 <b>Available USD:</b> ${balance_usd}\n"
-            f"🇷🇺 <b>Available RUB:</b> ₽{balance_rub}\n"
-            f"🔒 <b>Funds on Hold:</b> ₽{hold_rub}\n\n"
-            f"🤖 <b>Bot Sales (Server 3)</b>\n"
-            f"🛍️ <b>Total Accounts Sold:</b> {total_s3_sold}\n"
-            f"📈 <b>Total INR Earned:</b> ₹{total_inr_earned:.2f}\n"
-            f"📉 <b>Total LZT Spent:</b> ${total_usd_spent:.2f}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━"
-        )
-        
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Close", callback_data="delete_msg")]
-        ])
-        
-        await checking.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            return await msg.answer("<h2>❌ Unauthorized</h2>", parse_mode="HTML")
+        await _render_lzt_balance(msg, edit=False)
+
+    @dp.callback_query(F.data == "lzt_balance_btn")
+    async def cb_lzt_balance(cq: CallbackQuery):
+        if not is_admin(cq.from_user.id):
+            return await cq.answer("Unauthorized", show_alert=True)
+        await cq.answer()
+        await _render_lzt_balance(cq.message, edit=True)
+
+    return send_lzt_countries_message
+

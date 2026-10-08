@@ -2,8 +2,7 @@
 
 Every normal outgoing text message is upgraded to Bot API 10.3 ``sendRichMessage``.
 If Telegram rejects rich messages (for example, an outdated self-hosted Bot API), the
-original classic message is sent automatically.  This keeps every existing bot flow
-working while giving supported clients native rich cards and Premium emoji.
+original classic message is sent automatically with converted HTML and Premium emoji.
 """
 
 from __future__ import annotations
@@ -18,18 +17,63 @@ from typing import Any
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import (
-    EditMessageText, SendAnimation, SendAudio, SendDocument, SendMessage,
-    SendPhoto, SendRichMessage, SendVideo, SendVoice,
+    EditMessageCaption, EditMessageText, SendAnimation, SendAudio, SendDocument,
+    SendMessage, SendPhoto, SendVideo, SendVoice,
 )
 from aiogram.types import (
     InlineKeyboardButton, InlineKeyboardMarkup, InputMediaAnimation,
     InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo,
-    InputRichBlockAnimation, InputRichBlockAudio, InputRichBlockDocument,
-    InputRichBlockPhoto, InputRichBlockVideo, InputRichMessage, RichBlockCaption,
-    RichTextCustomEmoji,
 )
 
+try:
+    from aiogram.methods import SendRichMessage
+except ImportError:  # pragma: no cover
+    SendRichMessage = None
+
+try:
+    from aiogram.types import (
+        InputRichBlockAnimation, InputRichBlockAudio, InputRichBlockDocument,
+        InputRichBlockPhoto, InputRichBlockVideo, InputRichMessage, RichBlockCaption,
+        RichTextCustomEmoji,
+    )
+except ImportError:  # pragma: no cover
+    InputRichBlockAnimation = InputRichBlockAudio = InputRichBlockDocument = None
+    InputRichBlockPhoto = InputRichBlockVideo = InputRichMessage = None
+    RichBlockCaption = RichTextCustomEmoji = None
+
+try:
+    from aiogram.types import InputRichMessageMedia
+except ImportError:  # pragma: no cover
+    InputRichMessageMedia = None
+
 log = logging.getLogger("tga.rich")
+
+# Explicit brand/feature custom emoji IDs requested by owner
+TELEGRAM_EMOJI_ID = "5866355487255039002"
+WHATSAPP_EMOJI_ID = "5935973359480213803"
+API_DOCS_EMOJI_ID = "4994749624662098557"
+UPI_EMOJI_ID = "6152069549442208798"
+
+
+def tg_icon(alt: str = "✈️") -> str:
+    """Return a Rich/HTML Telegram custom emoji tag."""
+    return f'<tg-emoji emoji-id="{TELEGRAM_EMOJI_ID}">{alt}</tg-emoji>'
+
+
+def wa_icon(alt: str = "💬") -> str:
+    """Return a Rich/HTML WhatsApp custom emoji tag."""
+    return f'<tg-emoji emoji-id="{WHATSAPP_EMOJI_ID}">{alt}</tg-emoji>'
+
+
+def api_icon(alt: str = "📚") -> str:
+    """Return a Rich/HTML API Docs custom emoji tag."""
+    return f'<tg-emoji emoji-id="{API_DOCS_EMOJI_ID}">{alt}</tg-emoji>'
+
+
+def upi_icon(alt: str = "💳") -> str:
+    """Return a Rich/HTML UPI custom emoji tag."""
+    return f'<tg-emoji emoji-id="{UPI_EMOJI_ID}">{alt}</tg-emoji>'
+
 
 # Prefer icon-oriented packs, then use the larger decorative packs as fallback.
 _PACK_ORDER = (
@@ -45,6 +89,85 @@ _PACK_ORDER = (
 )
 _EMOJI_DIR = Path(__file__).with_name("EMOJI_IDS")
 
+# Owner-supplied custom emoji IDs for the 47 UI emojis + API Docs
+_OWNER_CUSTOM_EMOJI_IDS: dict[str, str] = {
+    "🛒": "5201850941925531200",   # Buy badge
+    "🏪": "5202058053838483782",   # Shop badge
+    "🏦": "5264895611517300926",   # Bank building
+    "🏢": "5264733042710181045",   # Office / Panel building
+    "🅱️": "5217811903685865303",   # Binance logo
+    "🅱": "5217811903685865303",
+    "🆔": "5202109872618908003",   # iD badge
+    "🧾": "5204242830687494041",   # Receipt icon
+    "📋": "5348178055338671586",   # Clipboard checkmark
+    "📑": "6021547434641987535",   # Document search
+    "📜": "6021435576513730578",   # History list
+    "🎟️": "5249061621875100582",   # Coupon tag
+    "🎟": "5249061621875100582",
+    "📢": "6008220984346152956",   # Megaphone
+    "📩": "5256100953014152571",   # Incoming OTP / Bookmark
+    "📨": "5406631276042002796",   # Incoming envelope
+    "📭": "5287533898803211359",   # Mailbox
+    "📲": "5819062970998590994",   # Devices / Mobile app
+    "💌": "6215361789538866270",   # Invite letter
+    "🔑": "5330115548900501467",   # Golden key
+    "🛠️": "5462921117423384478",   # FIX / Maintenance tools
+    "🛠": "5462921117423384478",
+    "🎛️": "5194904833051632910",   # Controls / Red gear
+    "🎛": "5194904833051632910",
+    "📡": "5202020730572682019",   # Connect badge
+    "🛰️": "5321304062715517873",   # Satellite
+    "🛰": "5321304062715517873",
+    "👮": "6269458311381258421",   # ADMIN badge
+    "🐛": "5397991236361527676",   # Bug / Debug
+    "⏳": "5451732530048802485",   # Hourglass
+    "🕒": "5408910404732595664",   # Clock
+    "📅": "5274055917766202507",   # Calendar
+    "🔁": "5346269127059196142",   # Repeat / Refresh arrows
+    "♻️": "5803057229909202251",   # Spinner / Refresh
+    "♻": "5803057229909202251",
+    "🚧": "6334528491844798409",   # Construction / Under work
+    "🌍": "5399898266265475100",   # Globe 1
+    "🌏": "5397753673130463064",   # Globe 2
+    "🎯": "5350460637182993292",   # Target / Pin
+    "🏁": "5411520005386806155",   # Checkered flag
+    "🎣": "5343609421316521960",   # Fishing pole
+    "🔤": "5201805788934351199",   # LOG badge
+    "🛟": "5780419462314331907",   # Lifebuoy
+    "🥂": "5803393311100113792",   # Champagne / Celebration
+    "🦁": "6082571661423414884",   # Golden Lion
+    "👽": "6114094221705091516",   # Alien
+    "😔": "6224160773074061577",   # Sad character
+    "👇": "6023566962624306038",   # Pointing down
+    "👉": "6021623107670776267",   # Pointing right
+    "👈": "6021510515103111203",   # Pointing left/right
+    "➖": "5346176879751612829",   # Divider line
+    "▪️": "5875091588174059190",   # Red dot
+    "▪": "5875091588174059190",
+    "🔹": "5980787993139481991",   # Blue spark
+    "📘": API_DOCS_EMOJI_ID,       # API Docs icon
+    "📚": API_DOCS_EMOJI_ID,
+    "✈️": TELEGRAM_EMOJI_ID,
+    "✈": TELEGRAM_EMOJI_ID,
+}
+
+# Symbols that must remain plain Unicode characters (per owner request: "◍➔ ➜ → ← Ye sa aisa he rendo")
+_PLAIN_UNICODE_SYMBOLS = {"◍", "➔", "➜", "→", "←"}
+
+
+def _register_emoji(mapping: dict[str, str], emoji: str, custom_id: str, overwrite: bool = False) -> None:
+    if not emoji or not custom_id or emoji in _PLAIN_UNICODE_SYMBOLS:
+        return
+    base = emoji.rstrip("\ufe0f")
+    if base in _PLAIN_UNICODE_SYMBOLS:
+        return
+    variants = (emoji, base, f"{base}\ufe0f")
+    for variant in variants:
+        if not variant:
+            continue
+        if overwrite or variant not in mapping:
+            mapping[variant] = custom_id
+
 
 def _load_emoji_ids() -> dict[str, str]:
     result: dict[str, str] = {}
@@ -58,19 +181,41 @@ def _load_emoji_ids() -> dict[str, str]:
             if not isinstance(item, dict):
                 continue
             emoji = str(item.get("emoji") or "")
-            emoji_id = str(item.get("custom_emoji_id") or item.get("id") or "")
-            if emoji and emoji_id:
+            custom_id = str(item.get("custom_emoji_id") or item.get("id") or "")
+            if emoji and custom_id:
                 # First pack wins, so the icon packs keep priority.
-                result.setdefault(emoji, emoji_id)
+                _register_emoji(result, emoji, custom_id, overwrite=False)
+
+    # Apply explicit owner custom emoji IDs with highest priority.
+    for emoji, custom_id in _OWNER_CUSTOM_EMOJI_IDS.items():
+        _register_emoji(result, emoji, custom_id, overwrite=True)
+
+    # Ensure plain symbols are never replaced.
+    for sym in _PLAIN_UNICODE_SYMBOLS:
+        result.pop(sym, None)
+        result.pop(f"{sym}\ufe0f", None)
     return result
 
 
 EMOJI_IDS = _load_emoji_ids()
-_EMOJI_PATTERN = re.compile(
-    "|".join(re.escape(item) for item in sorted(EMOJI_IDS, key=len, reverse=True))
-) if EMOJI_IDS else re.compile(r"(?!x)x")
-_TAG_SPLIT = re.compile(r"(<[^>]+>)")
+_SORTED_EMOJIS = sorted(EMOJI_IDS, key=len, reverse=True)
+_EMOJI_PATTERN = (
+    re.compile("|".join(re.escape(item) for item in _SORTED_EMOJIS))
+    if _SORTED_EMOJIS
+    else re.compile(r"(?!x)x")
+)
+# Split by complete <tg-emoji>...</tg-emoji> blocks first so they are never double-wrapped.
+_TAG_SPLIT = re.compile(r"(<tg-emoji\b[^>]*>.*?</tg-emoji>|<[^>]+>)", flags=re.I | re.S)
 _INR_AMOUNT = re.compile(r"₹\s*([0-9][0-9,]*(?:\.[0-9]+)?)")
+
+_BLOCK_OPEN_RE = re.compile(
+    r"(\s*<(?:h[1-6]|p|blockquote|ul|ol|li|details|summary|hr)\b[^>]*>\s*)",
+    flags=re.I,
+)
+_BLOCK_CLOSE_RE = re.compile(
+    r"(\s*</(?:h[1-6]|p|blockquote|ul|ol|li|details|summary)>\s*)",
+    flags=re.I,
+)
 
 
 def convert_currency(text: str, currency: str | None) -> str:
@@ -90,7 +235,11 @@ def convert_currency(text: str, currency: str | None) -> str:
 
 def emoji_id(emoji: str) -> str | None:
     """Return a Premium custom-emoji id for a Unicode emoji, if supplied."""
-    return EMOJI_IDS.get(emoji) or EMOJI_IDS.get(emoji.rstrip("\ufe0f"))
+    return (
+        EMOJI_IDS.get(emoji)
+        or EMOJI_IDS.get(emoji.rstrip("\ufe0f"))
+        or EMOJI_IDS.get(f"{emoji.rstrip(chr(0xfe0f))}\ufe0f")
+    )
 
 
 def _premium_text(text: str) -> str:
@@ -111,45 +260,172 @@ def to_rich_html(text: str, parse_mode: Any = "HTML") -> str:
     """Convert classic Telegram HTML/plain text into valid Rich HTML.
 
     Rich HTML follows browser whitespace rules, unlike ``sendMessage``. Therefore,
-    line breaks are explicitly converted to ``<br>``. Existing code/pre blocks are
-    left untouched so their whitespace remains meaningful.
+    line breaks inside text are converted to ``<br>`` while extra whitespace around
+    block tags (``<h2>``, ``<blockquote>``, ``<p>``, ``<hr>``) is normalized so no
+    unwanted blank gaps appear. Existing code/pre blocks are left untouched.
     """
     source = str(text or "")
     mode = str(parse_mode or "").upper()
-    # Aiogram's Default('parse_mode') means the configured HTML default.
-    is_html = "HTML" in mode or parse_mode is not None and "DEFAULT" in mode
+    is_html = "HTML" in mode or (parse_mode is not None and "DEFAULT" in mode)
     if not is_html:
         source = html.escape(source)
 
     source = re.sub(
-        r'<span\s+class=["\']tg-spoiler["\']\s*>',
-        "<tg-spoiler>",
+        r'<span\s+class=["\']tg-spoiler["\']\s*>(.*?)</span>',
+        r"<tg-spoiler>\1</tg-spoiler>",
         source,
-        flags=re.IGNORECASE,
+        flags=re.IGNORECASE | re.DOTALL,
     )
-    source = re.sub(r"</span>", "</tg-spoiler>", source, flags=re.IGNORECASE)
 
-    # Preserve literal newlines in preformatted blocks; use explicit breaks elsewhere.
+    # Preserve literal newlines in preformatted blocks; normalize breaks elsewhere.
     chunks = re.split(r"(<pre(?:\s[^>]*)?>.*?</pre>)", source, flags=re.I | re.S)
     for idx in range(0, len(chunks), 2):
-        chunks[idx] = chunks[idx].replace("\r\n", "\n").replace("\r", "\n")
-        chunks[idx] = chunks[idx].replace("\n", "<br>")
+        seg = chunks[idx].replace("\r\n", "\n").replace("\r", "\n")
+        # Remove newlines immediately surrounding block tags so they don't turn into <br>
+        seg = re.sub(
+            r"\n+\s*(<(?:h[1-6]|p|blockquote|ul|ol|li|details|summary|hr)\b[^>]*>)",
+            r"\1",
+            seg,
+            flags=re.I,
+        )
+        seg = re.sub(
+            r"(<(?:h[1-6]|p|blockquote|ul|ol|li|details|summary|hr)\b[^>]*>)\s*\n+",
+            r"\1",
+            seg,
+            flags=re.I,
+        )
+        seg = re.sub(
+            r"\n+\s*(</(?:h[1-6]|p|blockquote|ul|ol|li|details|summary)>)",
+            r"\1",
+            seg,
+            flags=re.I,
+        )
+        seg = re.sub(
+            r"(</(?:h[1-6]|p|blockquote|ul|ol|li|details|summary)>)\s*\n+",
+            r"\1",
+            seg,
+            flags=re.I,
+        )
+        seg = seg.replace("\n", "<br>")
+        chunks[idx] = seg
     return _premium_text("".join(chunks))
 
 
-def premium_button(button: InlineKeyboardButton, currency: str | None = None) -> InlineKeyboardButton:
-    """Use a Premium icon on a button and deliberately remove color styling."""
+def to_classic_html(text: str, parse_mode: Any = "HTML") -> str:
+    """Convert Rich HTML into classic Telegram HTML (for SendPhoto/SendMessage fallback)."""
+    source = str(text or "")
+    mode = str(parse_mode or "").upper()
+    is_html = "HTML" in mode or (parse_mode is not None and "DEFAULT" in mode)
+    if not is_html:
+        return html.escape(source)
+
+    source = re.sub(
+        r'<span\s+class=["\']tg-spoiler["\']\s*>(.*?)</span>',
+        r"<tg-spoiler>\1</tg-spoiler>",
+        source,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    source = re.sub(r"<img\b[^>]*/?>", "", source, flags=re.I)
+    source = re.sub(r"<h[1-6]\b[^>]*>(.*?)</h[1-6]>", r"<b>\1</b>\n\n", source, flags=re.I | re.S)
+    source = re.sub(r"<p\b[^>]*>(.*?)</p>", r"\1\n\n", source, flags=re.I | re.S)
+    source = re.sub(r"<hr\s*/?>", "\n", source, flags=re.I)
+    source = re.sub(r"<br\s*/?>", "\n", source, flags=re.I)
+    source = re.sub(r"(</blockquote>)\s*(?!\n)", r"\1\n\n", source, flags=re.I)
+    source = re.sub(r"\n{3,}", "\n\n", source).strip()
+    return _premium_text(source)
+
+
+def _clean_leading_symbol(text: str, symbol: str) -> str:
+    cleaned = text[len(symbol):]
+    cleaned = cleaned.lstrip("\ufe0f\u200d \t")
+    return cleaned or text
+
+
+def premium_button(
+    button: InlineKeyboardButton | str | None = None,
+    currency: str | None = None,
+    *,
+    text: str | None = None,
+    custom_emoji_id: str | None = None,
+    icon_custom_emoji_id: str | None = None,
+    **kwargs: Any,
+) -> InlineKeyboardButton:
+    """Use a Premium icon on every button and keep clean text."""
+    if not isinstance(button, InlineKeyboardButton):
+        btn_text = button if isinstance(button, str) else (text or "")
+        chosen_id = custom_emoji_id or icon_custom_emoji_id
+        button = InlineKeyboardButton(
+            text=btn_text,
+            icon_custom_emoji_id=chosen_id,
+            **kwargs,
+        )
+    raw_text = button.text or ""
+    cb = button.callback_data or ""
     updates: dict[str, Any] = {
         "style": None,
-        "text": convert_currency(button.text, currency),
+        "text": convert_currency(raw_text, currency),
     }
-    if not button.icon_custom_emoji_id:
-        for symbol in sorted(EMOJI_IDS, key=len, reverse=True):
-            if button.text.startswith(symbol):
-                updates["icon_custom_emoji_id"] = EMOJI_IDS[symbol]
-                cleaned = button.text[len(symbol):].lstrip()
-                updates["text"] = convert_currency(cleaned or button.text, currency)
-                break
+
+    custom_id = custom_emoji_id or icon_custom_emoji_id or button.icon_custom_emoji_id
+
+    # Explicit overrides requested by owner
+    if not custom_id:
+        if cb == "api_docs":
+            custom_id = API_DOCS_EMOJI_ID
+        elif cb in {"buy", "s3tg_open", "s3_toggle:lzt", "admin_toggle:telegram"}:
+            custom_id = TELEGRAM_EMOJI_ID
+        elif cb in {"buy_wa", "buy_server3:wa", "admin_toggle:whatsapp", "s3_toggle:wa"}:
+            custom_id = WHATSAPP_EMOJI_ID
+        elif cb in {
+            "recharge_upi_auto",
+            "recharge_upi_manual",
+            "pset_inr:upi",
+            "pset_toggle:manual_upi",
+            "pset_edit:manual_upi_id",
+        } or "upi" in raw_text.lower():
+            custom_id = UPI_EMOJI_ID
+
+    # Strip leading emoji (and variation selector) and detect icon if not already set
+    stripped_text = raw_text.lstrip()
+    if stripped_text.startswith("• ") and stripped_text.endswith(" •"):
+        stripped_text = stripped_text[2:-2].strip()
+    elif stripped_text.startswith("• "):
+        stripped_text = stripped_text[2:].strip()
+
+    for symbol in _SORTED_EMOJIS:
+        if stripped_text.startswith(symbol):
+            if not custom_id:
+                custom_id = EMOJI_IDS[symbol]
+            stripped_text = _clean_leading_symbol(stripped_text, symbol)
+            break
+
+    # Secondary detection for buttons without a leading emoji
+    if not custom_id:
+        lower = stripped_text.lower()
+        if button.copy_text is not None or lower.startswith("copy "):
+            custom_id = EMOJI_IDS.get("📄")
+        elif "get otp" in lower or "get code" in lower or "login code" in lower:
+            custom_id = EMOJI_IDS.get("✉️")
+        elif "buy now" in lower:
+            custom_id = EMOJI_IDS.get("🛍️")
+        elif "support" in lower:
+            custom_id = EMOJI_IDS.get("👨‍💻")
+        elif "remove" in lower or "logout" in lower or "reject" in lower:
+            custom_id = EMOJI_IDS.get("🚪")
+        elif stripped_text.startswith("₹"):
+            custom_id = EMOJI_IDS.get("💱")
+        elif stripped_text.startswith("$"):
+            custom_id = EMOJI_IDS.get("💵")
+        else:
+            # Look for any known emoji inside the button label (e.g. "S1: 🟢 ON")
+            for symbol in _SORTED_EMOJIS:
+                if symbol in stripped_text:
+                    custom_id = EMOJI_IDS[symbol]
+                    break
+
+    if custom_id:
+        updates["icon_custom_emoji_id"] = custom_id
+    updates["text"] = convert_currency(stripped_text or raw_text, currency)
     return button.model_copy(update=updates)
 
 
@@ -196,13 +472,37 @@ def _premium_rich_text(text: str):
 
 
 def _media_rich_message(method: Any, currency: str | None) -> InputRichMessage | None:
-    """Build an explicit native Rich Message media block for media sends."""
-    caption_text = _plain_caption(getattr(method, "caption", None), currency)
-    caption = RichBlockCaption(text=_premium_rich_text(caption_text)) if caption_text else None
+    """Build a native Rich Message for media sends, preserving Rich HTML for photos."""
     if isinstance(method, SendPhoto):
-        media = InputMediaPhoto(media=method.photo, has_spoiler=method.has_spoiler)
-        block = InputRichBlockPhoto(photo=media, caption=caption)
-    elif isinstance(method, SendVideo):
+        # For string photo references (file_id or URL), embed the photo inside Rich HTML
+        # so headings, blockquotes, code tags, spoilers and custom emojis all render.
+        if InputRichMessageMedia is not None and isinstance(method.photo, str):
+            caption_html = to_rich_html(
+                convert_currency(method.caption or "", currency),
+                method.parse_mode,
+            )
+            media_item = InputRichMessageMedia(
+                id="photo1",
+                media=InputMediaPhoto(media=method.photo, has_spoiler=method.has_spoiler),
+            )
+            return InputRichMessage(
+                html=f'<img src="tg://photo?id=photo1"/>{caption_html}',
+                media=[media_item],
+                skip_entity_detection=False,
+            )
+        # For uploaded binary files (e.g. BufferedInputFile), let SendPhoto handle the
+        # multipart upload directly with full classic HTML + custom emoji captions.
+        return None
+
+    # If a non-photo media method has HTML formatting in its caption, keep classic send
+    # so tags like <b> and <code> are not stripped.
+    raw_caption = getattr(method, "caption", None)
+    if raw_caption and "<" in str(raw_caption) and ">" in str(raw_caption):
+        return None
+
+    caption_text = _plain_caption(raw_caption, currency)
+    caption = RichBlockCaption(text=_premium_rich_text(caption_text)) if caption_text else None
+    if isinstance(method, SendVideo):
         media = InputMediaVideo(
             media=method.video, thumbnail=method.thumbnail, cover=method.cover,
             start_timestamp=method.start_timestamp, width=method.width,
@@ -229,8 +529,6 @@ def _media_rich_message(method: Any, currency: str | None) -> InputRichMessage |
         )
         block = InputRichBlockAnimation(animation=media, caption=caption)
     else:
-        # InputRichBlockVoiceNote currently accepts only remote/file-id strings,
-        # while SendVoice also accepts uploads. Keep its safe classic fallback.
         return None
     return InputRichMessage(blocks=[block])
 
@@ -253,6 +551,24 @@ def _common_rich_send(method: Any, rich_message: InputRichMessage, currency: str
 
 
 def _upgrade_method(method: Any, currency: str | None = None) -> Any:
+    if SendRichMessage is None or InputRichMessage is None:
+        updates: dict[str, Any] = {"reply_markup": premium_markup(getattr(method, "reply_markup", None), currency)}
+        if isinstance(method, (SendMessage, EditMessageText)):
+            updates["text"] = to_classic_html(
+                convert_currency(method.text or "", currency),
+                method.parse_mode,
+            )
+            updates["parse_mode"] = "HTML"
+            return method.model_copy(update=updates)
+        if isinstance(method, (*_MEDIA_METHODS, EditMessageCaption)):
+            if getattr(method, "caption", None):
+                updates["caption"] = to_classic_html(
+                    convert_currency(method.caption or "", currency),
+                    getattr(method, "parse_mode", "HTML"),
+                )
+                updates["parse_mode"] = "HTML"
+            return method.model_copy(update=updates)
+        return method
     if isinstance(method, SendMessage):
         return SendRichMessage(
             chat_id=method.chat_id,
@@ -275,6 +591,13 @@ def _upgrade_method(method: Any, currency: str | None = None) -> Any:
         rich_media = _media_rich_message(method, currency)
         if rich_media is not None:
             return _common_rich_send(method, rich_media, currency)
+        updates: dict[str, Any] = {"reply_markup": premium_markup(method.reply_markup, currency)}
+        if getattr(method, "caption", None):
+            updates["caption"] = to_classic_html(
+                convert_currency(method.caption or "", currency),
+                getattr(method, "parse_mode", "HTML"),
+            )
+        return method.model_copy(update=updates)
     if isinstance(method, EditMessageText):
         return method.model_copy(
             update={
@@ -288,6 +611,14 @@ def _upgrade_method(method: Any, currency: str | None = None) -> Any:
                 "reply_markup": premium_markup(method.reply_markup, currency),
             }
         )
+    if isinstance(method, EditMessageCaption):
+        updates = {"reply_markup": premium_markup(method.reply_markup, currency)}
+        if getattr(method, "caption", None):
+            updates["caption"] = to_classic_html(
+                convert_currency(method.caption or "", currency),
+                getattr(method, "parse_mode", "HTML"),
+            )
+        return method.model_copy(update=updates)
     return method
 
 
@@ -302,7 +633,9 @@ class RichBot(Bot):
 
     async def __call__(self, method: Any, request_timeout: int | None = None) -> Any:
         currency = None
-        if self.currency_resolver and isinstance(method, (SendMessage, EditMessageText, *_MEDIA_METHODS)):
+        if self.currency_resolver and isinstance(
+            method, (SendMessage, EditMessageText, EditMessageCaption, *_MEDIA_METHODS)
+        ):
             try:
                 currency = self.currency_resolver(method.chat_id)
             except Exception:
@@ -315,11 +648,17 @@ class RichBot(Bot):
                 raise
             # Keep the complete old behavior as a compatibility/error fallback.
             log.warning("Rich message rejected; using classic fallback: %s", exc)
-            updates = {"reply_markup": premium_markup(method.reply_markup, currency)}
+            updates: dict[str, Any] = {"reply_markup": premium_markup(method.reply_markup, currency)}
             if isinstance(method, (SendMessage, EditMessageText)):
-                updates["text"] = convert_currency(method.text or "", currency)
-            elif isinstance(method, _MEDIA_METHODS):
-                updates["caption"] = convert_currency(method.caption or "", currency)
+                updates["text"] = to_classic_html(
+                    convert_currency(method.text or "", currency),
+                    method.parse_mode,
+                )
+            elif isinstance(method, (*_MEDIA_METHODS, EditMessageCaption)):
+                updates["caption"] = to_classic_html(
+                    convert_currency(getattr(method, "caption", "") or "", currency),
+                    getattr(method, "parse_mode", "HTML"),
+                )
             fallback = method.model_copy(update=updates)
             try:
                 return await super().__call__(fallback, request_timeout=request_timeout)

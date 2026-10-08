@@ -38,6 +38,7 @@ from payment_settings import (
     toggle_usdt,
 )
 from config import BINANCE_PAY_ID, BINANCE_QR_URL
+from rich_messages import UPI_EMOJI_ID, upi_icon
 
 
 # CONFIG
@@ -123,6 +124,41 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         user = users_col.find_one({"_id": user_id})
         return user.get("balance", 0) if user else 0
 
+    async def _credit_user_and_referral(user_id: int, amount_inr: float, method_label: str = "Deposit") -> float:
+        users_col.update_one(
+            {"_id": user_id}, {"$inc": {"balance": amount_inr}}, upsert=True
+        )
+        new_balance = get_balance(user_id)
+        try:
+            user_doc = users_col.find_one({"_id": user_id}) or {}
+            referrer_id = user_doc.get("referred_by")
+            if referrer_id and referrer_id != user_id and amount_inr > 0:
+                feat = settings_col.find_one({"_id": "bot_features"}) or {}
+                comm_pct = float(feat.get("refer_commission_percent", 2.0))
+                if comm_pct > 0:
+                    comm_inr = round(float(amount_inr) * (comm_pct / 100.0), 2)
+                    if comm_inr > 0:
+                        users_col.update_one(
+                            {"_id": referrer_id},
+                            {"$inc": {"balance": comm_inr, "referral_earnings": comm_inr}},
+                        )
+                        ref_doc = users_col.find_one({"_id": referrer_id}) or {}
+                        ref_bal = float(ref_doc.get("balance", 0.0))
+                        await bot.send_message(
+                            referrer_id,
+                            f"<h2>🎁 Referral Deposit Commission!</h2>"
+                            f"<blockquote>"
+                            f"💰 <b>Commission Earned:</b> <code>+₹{comm_inr:.2f}</code> ({comm_pct:g}%)\n"
+                            f"👤 <b>Referred User ID:</b> <code>{user_id}</code>\n"
+                            f"💳 <b>Deposit Amount:</b> <code>₹{float(amount_inr):.2f}</code> ({escape(method_label)})\n"
+                            f"🏦 <b>Your New Balance:</b> <code>₹{ref_bal:.2f}</code>"
+                            f"</blockquote>",
+                            parse_mode="HTML",
+                        )
+        except Exception as exc:
+            print(f"[referral_commission] error: {exc}")
+        return new_balance
+
     def _fmt_amount(value, decimals: int = 8) -> str:
         """Format a number without noisy trailing zeroes for Telegram text."""
         try:
@@ -149,7 +185,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             return None
         return amount
 
-    def _back_kb(callback_data: str = "recharge", text: str = "🔙 Back"):
+    def _back_kb(callback_data: str = "recharge", text: str = "⬅️ Back"):
         kb = InlineKeyboardBuilder()
         kb.button(text=text, callback_data=callback_data)
         kb.adjust(1)
@@ -157,7 +193,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
 
     def _cancel_kb(callback_data: str = "recharge"):
         """Small, consistent back keyboard used by every user prompt."""
-        return _back_kb(callback_data)
+        return _back_kb(callback_data, text="⬅️ Back to Deposit Menu")
 
     async def _delete_message(message):
         try:
@@ -268,18 +304,16 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
     # ==============================
     async def show_recharge_terms(target, edit=False):
         text = (
-            "⚠️ <b>Recharge Terms &amp; Conditions</b>\n\n"
-            "<blockquote>"
-            "• <b>All recharges are 100% NON-REFUNDABLE.</b>\n"
-            "• Once the amount is added to your bot wallet, it <b>cannot be withdrawn</b> or transferred back to your bank or crypto wallet under any circumstances.\n"
-            "• <u>Never send a payment on an incorrect network.</u>\n"
-            "• <b>Do not ask for a refund if any item/service is out of stock.</b> Please try another country/operator or wait for restock."
-            "</blockquote>\n\n"
-            "<i>By clicking <b>✅ I Accept</b>, you agree to these terms.</i>\n\n"
-            "🎧 <b>Note:</b> If you face any issue during recharge, please contact our <u>Support</u> team."
+            "<h2>⚠️ Wallet Deposit Terms &amp; Conditions</h2>"
+            "<blockquote>📋 <b>Mandatory Deposit Policy</b><br>"
+            "• 🔒 <b>Non-Refundable:</b> All wallet recharges are 100% final and non-refundable.<br>"
+            "• 🏦 <b>No Bank/Crypto Withdrawal:</b> Added wallet balance is strictly for purchasing bot services and cannot be withdrawn back.<br>"
+            "• 🌐 <b>Network Accuracy:</b> Always send crypto on the exact selected network. Cross-chain mistakes cannot be recovered.<br>"
+            "• 📦 <b>Stock Policy:</b> If a specific country/service is temporarily out of stock, your balance stays safe in your wallet for any other service or restock.</blockquote>"
+            "<p>🎧 <i>By tapping <b>✅ I Accept &amp; Continue</b> below, you agree to these terms. Contact Support anytime if you need help with a transaction.</i></p>"
         )
         kb = InlineKeyboardBuilder()
-        kb.button(text="✅ I Accept", callback_data="recharge_accept_terms")
+        kb.button(text="✅ I Accept & Continue", callback_data="recharge_accept_terms")
         kb.button(text="❌ Cancel", callback_data="back_main")
         kb.adjust(1)
 
@@ -298,42 +332,53 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
     async def show_recharge_menu(target, state: FSMContext, edit=False):
         await state.clear()
         settings = get_settings(settings_col)
+        chat_id = getattr(getattr(target, "chat", None), "id", None)
+        current_bal = get_balance(chat_id) if isinstance(chat_id, int) else 0.0
 
         kb = InlineKeyboardBuilder()
         available = 0
 
         if settings.get("active_inr_gateway"):
-            kb.button(text="💳 UPI (Auto)", callback_data="recharge_upi_auto")
+            kb.button(
+                text="💳 Instant UPI / QR (Auto)",
+                callback_data="recharge_upi_auto",
+                icon_custom_emoji_id=UPI_EMOJI_ID,
+            )
             available += 1
         if settings.get("manual_upi_enabled", False):
-            kb.button(text="🏦 UPI (Manual)", callback_data="recharge_upi_manual")
+            kb.button(
+                text="🏦 UPI Transfer (Manual Approval)",
+                callback_data="recharge_upi_manual",
+                icon_custom_emoji_id=UPI_EMOJI_ID,
+            )
             available += 1
         if settings.get("binance_enabled", True):
-            kb.button(text="🅱️ Binance Pay (Auto)", callback_data="recharge_binance")
+            kb.button(text="🅱️ Binance Pay (Auto Verify)", callback_data="recharge_binance")
             available += 1
         if settings.get("crypto_enabled", True):
-            kb.button(text="🪙 Crypto Deposits (Auto)", callback_data="recharge_crypto")
+            kb.button(text="🪙 Crypto & USDT (Auto Verify)", callback_data="recharge_crypto")
             available += 1
         if settings.get("cwallet_manual_enabled", True):
-            # Cwallet (Manual) sits directly under Crypto Deposits and above
-            # Recharge History in the main menu, as requested.
-            kb.button(text="🧾 Cwallet (Manual)", callback_data="recharge_cwallet_manual")
+            kb.button(text="🧾 Cwallet ID (Manual Approval)", callback_data="recharge_cwallet_manual")
             available += 1
-        kb.button(text="📜 Recharge History", callback_data="recharge_history")
-        kb.button(text="🔙 Back", callback_data="back_main")
+        kb.button(text="📜 Deposit History", callback_data="recharge_history")
+        kb.button(text="⬅️ Back to Main Menu", callback_data="back_main")
         kb.adjust(1)
 
         if available == 0:
             text = (
-                "💰 <b>Add Balance</b>\n\n"
-                "<blockquote>⚠️ All payment methods are currently disabled. "
-                "Please contact <u>Support</u>.</blockquote>"
+                "<h2>💳 Add Wallet Balance</h2>"
+                f"<blockquote>💰 <b>Current Balance:</b> <code>₹{_fmt_amount(current_bal, 2)}</code></blockquote>"
+                "<blockquote>⚠️ <b>Gateways Offline</b><br>"
+                "All deposit methods are temporarily undergoing maintenance. Please contact <b>Support</b> for assistance.</blockquote>"
             )
         else:
             text = (
-                "💰 <b>Add Balance</b>\n\n"
-                "<blockquote><i>Choose a secure payment method below.</i>\n"
-                "Your payment details stay private.</blockquote>"
+                "<h2>💳 Deposit &amp; Wallet Top-Up</h2>"
+                f"<blockquote>💰 <b>Available Balance:</b> <code>₹{_fmt_amount(current_bal, 2)}</code><br>"
+                f"💱 <b>Crypto Rate:</b> <code>1 USDT = ₹{USDT_TO_INR}</code> · <b>Min INR:</b> <code>₹{MIN_INR_DEPOSIT}</code><br>"
+                "⚡ <b>Processing:</b> 24/7 Instant Automated Verification</blockquote>"
+                "<p>👇 <i>Select your preferred payment method below:</i></p>"
             )
 
         if edit:
@@ -389,28 +434,27 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         kb = InlineKeyboardBuilder()
         available = 0
 
-        # Deliberately call the automatic Cwallet method simply "USDT" in the
-        # user UI, as requested.  The provider name is not exposed here.
         if settings.get("usdt_enabled", True):
-            kb.button(text="💵 USDT", callback_data="recharge_usdt")
+            kb.button(text="💵 USDT — Direct Network (Auto)", callback_data="recharge_usdt")
             available += 1
         if settings.get("crypto_enabled", True):
-            kb.button(text="🌐 Other Crypto Coins", callback_data="recharge_oxapay")
+            kb.button(text="🌐 All Crypto Coins — OxaPay (Auto)", callback_data="recharge_oxapay")
             available += 1
-        kb.button(text="🔙 Back", callback_data="recharge")
+        kb.button(text="⬅️ Back to Deposit Menu", callback_data="recharge")
         kb.adjust(1)
 
         if available:
             text = (
-                "🪙 <b>Crypto Deposits</b>\n\n"
-                "<blockquote><i>Select the coin/payment route you want to use.</i>\n"
-                "USDT verification is automatic.</blockquote>"
+                "<h2>🪙 Crypto &amp; Stablecoin Deposits</h2>"
+                f"<blockquote>💱 <b>Exchange Rate:</b> <code>1 USDT = ₹{USDT_TO_INR}</code><br>"
+                f"💵 <b>Minimum Deposit:</b> <code>{MIN_USDT} USDT</code><br>"
+                "⚡ <b>Settlement:</b> Instant automatic credit upon confirmation</blockquote>"
+                "<p>👇 <i>Select a crypto payment route below:</i></p>"
             )
         else:
             text = (
-                "🪙 <b>Crypto Deposits</b>\n\n"
-                "<blockquote>⚠️ Crypto deposits are currently unavailable. "
-                "Please contact <u>Support</u>.</blockquote>"
+                "<h2>🪙 Crypto Deposits</h2>"
+                "<blockquote>⚠️ Crypto deposits are temporarily unavailable. Please contact <b>Support</b>.</blockquote>"
             )
 
         if edit:
@@ -444,8 +488,6 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             await _delete_message(cq.message)
             await state.clear()
 
-            # This is only an internal tracking ID. FamPay is verified using
-            # the UTR/transaction ID submitted by the user, not an order ID.
             payment_id = f"fampay_{cq.from_user.id}_{secrets.token_hex(8)}"
             now = datetime.datetime.utcnow()
             txns_col.insert_one({
@@ -458,20 +500,22 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             })
 
             kb = InlineKeyboardBuilder()
+            kb.button(text="📋 Copy UPI ID", copy_text=CopyTextButton(text="swatireceiver@fam"))
             kb.button(
                 text="✅ I Paid — Verify UTR / Transaction ID",
                 callback_data=f"verify_fampay:{payment_id}",
             )
-            kb.button(text="🔙 Back", callback_data="recharge")
+            kb.button(text="⬅️ Back to Deposit Menu", callback_data="recharge")
             kb.adjust(1)
             caption = (
-                "📲 <b>FamPay / UPI (Auto)</b>\n\n"
-                "👤 Name: <b>Swati Kumari</b>\n"
-                "🆔 UPI ID: <code>swatireceiver@fam</code>\n\n"
-                "<blockquote>After paying, tap <b>Verify UTR / Transaction ID</b> and "
-                "send the UTR or FamPay transaction ID from your payment receipt. "
-                "No amount or screenshot is needed. The verified amount will be credited "
-                f"automatically (minimum ₹{MIN_INR_DEPOSIT}).</blockquote>"
+                "<h2>📲 FamPay / UPI Instant Deposit</h2>"
+                "<blockquote>👤 <b>Payee Name:</b> Swati Kumari<br>"
+                "🆔 <b>UPI ID:</b> <code>swatireceiver@fam</code><br>"
+                f"💵 <b>Minimum Deposit:</b> <code>₹{MIN_INR_DEPOSIT}</code></blockquote>"
+                "<blockquote>⚡ <b>How to Complete Payment</b><br>"
+                "1. Scan the QR code above or pay directly to the UPI ID.<br>"
+                "2. Tap <b>✅ I Paid — Verify UTR / Transaction ID</b> below.<br>"
+                "3. Send your 12-digit UTR or FamPay Transaction ID for instant credit!</blockquote>"
             )
             qr_photo = BufferedInputFile(
                 base64.b64decode(FAMPAY_QR_PNG_BASE64),
@@ -484,8 +528,10 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         elif gateway == "upi":
             await _delete_message(cq.message)
             msg = await cq.message.answer(
-                "💰 <b>Enter deposit amount</b>\n\n"
-                "<i>Minimum deposit: ₹10</i>",
+                "<h2>📲 Instant UPI QR Deposit</h2>"
+                f"<blockquote>💵 <b>Minimum Deposit:</b> <code>₹{MIN_INR_DEPOSIT}</code><br>"
+                "⚡ <b>Verification:</b> Automatic every 60s + instant manual check</blockquote>"
+                "<p>✍️ <i>Send the INR amount (₹) you want to deposit:</i></p>",
                 parse_mode="HTML",
                 reply_markup=_cancel_kb().as_markup(),
             )
@@ -513,9 +559,10 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         await _delete_message(cq.message)
         await state.clear()
         prompt = await cq.message.answer(
-            "💰 <b>Manual UPI — Enter Amount</b>\n\n"
-            f"Minimum deposit: <b>₹{MIN_INR_DEPOSIT}</b>. After payment, send a screenshot "
-            "for admin approval.",
+            "<h2>🏦 Manual UPI Deposit — Enter Amount</h2>"
+            f"<blockquote>💵 <b>Minimum Deposit:</b> <code>₹{MIN_INR_DEPOSIT}</code><br>"
+            "📸 <b>Verification:</b> Upload payment screenshot after transfer for admin approval.</blockquote>"
+            "<p>✍️ <i>Send the INR amount (₹) you want to deposit:</i></p>",
             parse_mode="HTML",
             reply_markup=_cancel_kb().as_markup(),
         )
@@ -574,16 +621,16 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         kb = InlineKeyboardBuilder()
         kb.button(text="📋 Copy UPI ID", copy_text=CopyTextButton(text=upi_id))
         kb.button(text="✅ I Have Paid — Send Screenshot", callback_data=f"manual_upi_paid:{request_id}")
-        kb.button(text="🔙 Back", callback_data="recharge")
+        kb.button(text="⬅️ Back to Deposit Menu", callback_data="recharge")
         kb.adjust(1)
         caption = (
-            "🏦 <b>UPI (Manual)</b>\n\n"
-            f"👤 <b>Name:</b> {escape(payee_name)}\n"
-            f"🆔 <b>UPI ID:</b> <code>{escape(upi_id)}</code>\n"
-            f"💰 <b>Amount to pay:</b> ₹{_fmt_amount(amount, 2)}\n\n"
-            "<blockquote>Pay the exact amount using this QR or UPI ID. Then tap "
-            "<b>I Have Paid</b> and send the payment screenshot. An admin will check "
-            "it and approve or reject the request.</blockquote>"
+            "<h2>🏦 Manual UPI Transfer</h2>"
+            f"<blockquote>👤 <b>Payee Name:</b> {escape(payee_name)}<br>"
+            f"🆔 <b>UPI ID:</b> <code>{escape(upi_id)}</code><br>"
+            f"💰 <b>Exact Amount to Pay:</b> <code>₹{_fmt_amount(amount, 2)}</code></blockquote>"
+            "<blockquote>📸 <b>Next Step</b><br>"
+            "Pay the exact amount using the QR code or UPI ID above, then tap "
+            "<b>✅ I Have Paid — Send Screenshot</b> to upload your payment receipt for admin approval.</blockquote>"
         )
         try:
             await message.answer_photo(
@@ -609,9 +656,9 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
 
         await state.clear()
         prompt = await cq.message.answer(
-            "📸 <b>Send payment screenshot</b>\n\n"
-            "Upload a clear screenshot as a photo or image. No UTR is required; "
-            "the admin will review the screenshot and the amount you entered.",
+            "<h2>📸 Upload Payment Screenshot</h2>"
+            "<blockquote>Upload a clear screenshot of your completed UPI transfer as a photo/image.<br>"
+            "An administrator will verify the screenshot and credit your wallet promptly.</blockquote>",
             parse_mode="HTML",
             reply_markup=_cancel_kb().as_markup(),
         )
@@ -722,12 +769,13 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
                     pass
 
         await message.answer(
-            "⏳ <b>Manual UPI proof submitted</b>\n\n"
-            f"💰 Amount: <b>₹{_fmt_amount(tx.get('amount_inr') or tx.get('amount'), 2)}</b>\n\n"
+            "<h2>⏳ Manual UPI Proof Submitted</h2>"
+            f"<blockquote>💰 <b>Requested Amount:</b> <code>₹{_fmt_amount(tx.get('amount_inr') or tx.get('amount'), 2)}</code><br>"
+            f"🔖 <b>Request ID:</b> <code>{escape(request_id)}</code></blockquote>"
             + (
-                "<blockquote>An admin will review your screenshot and notify you after approval.</blockquote>"
+                "<blockquote>✅ <b>Under Review:</b> An administrator will verify your screenshot and credit your wallet shortly.</blockquote>"
                 if sent_to_admin
-                else "<blockquote>Your request is saved, but no admin notification was delivered. Please contact Support.</blockquote>"
+                else "<blockquote>⚠️ Your request is saved, but admin notification failed. Please contact Support.</blockquote>"
             ),
             parse_mode="HTML",
             reply_markup=_cancel_kb().as_markup(),
@@ -743,18 +791,19 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         amount = _parse_positive_amount(message.text)
         if amount is None or amount < MIN_INR_DEPOSIT:
             msg = await message.answer(
-                "❌ <b>Invalid amount.</b>\n\nPlease enter an amount of <u>₹10 or more</u>.",
+                "<h2>❌ Invalid Deposit Amount</h2>"
+                f"<blockquote>Please enter an amount of <b>₹{MIN_INR_DEPOSIT} or more</b>.</blockquote>",
                 parse_mode="HTML",
                 reply_markup=_cancel_kb().as_markup(),
             )
             await state.update_data(last_msg=msg.message_id)
             return
 
-        wait_msg = await message.answer("⌛ <i>Generating QR…</i>", parse_mode="HTML")
+        wait_msg = await message.answer("⌛ <i>Generating UPI QR invoice…</i>", parse_mode="HTML")
         res = create_upi_invoice(amount)
         if not res["success"]:
             await wait_msg.edit_text(
-                f"❌ <b>Error:</b> {escape(str(res.get('error', 'Unable to create QR')))}",
+                f"<h2>❌ Gateway Error</h2><blockquote>{escape(str(res.get('error', 'Unable to create QR')))}</blockquote>",
                 parse_mode="HTML",
                 reply_markup=_cancel_kb().as_markup(),
             )
@@ -774,15 +823,17 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         })
 
         kb = InlineKeyboardBuilder()
-        kb.button(text="✅ Verify Payment", callback_data=f"verify_upi:{order_id}")
-        kb.button(text="🔙 Back", callback_data="recharge")
+        kb.button(text="✅ Verify Payment Now", callback_data=f"verify_upi:{order_id}")
+        kb.button(text="⬅️ Back to Deposit Menu", callback_data="recharge")
         kb.adjust(1)
         caption = (
-            "📲 <b>UPI (Auto)</b>\n\n"
-            f"💵 Amount: <b>₹{_fmt_amount(amount, 2)}</b>\n"
-            f"🆔 Order ID: <tg-spoiler><code>{escape(order_id)}</code></tg-spoiler>\n\n"
-            "<blockquote>Scan with any UPI app. We auto-check every minute, or tap "
-            "<b>Verify Payment</b> manually.</blockquote>"
+            "<h2>📲 Instant UPI QR Invoice</h2>"
+            f"<blockquote>💵 <b>Amount to Pay:</b> <code>₹{_fmt_amount(amount, 2)}</code><br>"
+            f"🆔 <b>Order ID:</b> <tg-spoiler><code>{escape(order_id)}</code></tg-spoiler><br>"
+            f"⏳ <b>Validity:</b> <code>{UPI_INVOICE_EXPIRY_MIN} minutes</code></blockquote>"
+            "<blockquote>⚡ <b>Auto-Verification Active</b><br>"
+            "Scan with any UPI app (GPay, PhonePe, Paytm, FamPay). Our system auto-verifies every 60 seconds, "
+            "or tap <b>✅ Verify Payment Now</b> immediately after paying!</blockquote>"
         )
         await wait_msg.delete()
         await message.answer_photo(
@@ -826,9 +877,9 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
 
         await state.clear()
         prompt = await cq.message.answer(
-            "🧾 <b>Send your UTR or FamPay Transaction ID</b>\n\n"
-            "Paste the reference exactly as shown in your payment receipt. "
-            "No screenshot or amount is needed.",
+            "<h2>🧾 Verify UTR / FamPay Transaction ID</h2>"
+            "<blockquote>Paste your 12-digit <b>UTR</b> or <b>FamPay Transaction ID</b> exactly as shown on your payment receipt.<br>"
+            "⚡ <i>No screenshot or amount entry is needed — our system verifies and credits the exact amount automatically!</i></blockquote>",
             parse_mode="HTML",
             reply_markup=_cancel_kb().as_markup(),
         )
@@ -1069,15 +1120,18 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
 
         await _delete_message(cq.message)
         kb = InlineKeyboardBuilder()
-        kb.button(text="Copy Pay ID", copy_text=CopyTextButton(text=str(BINANCE_PAY_ID)))
-        kb.button(text="✅ Verify Payment", callback_data="binance_verify_start")
-        kb.button(text="🔙 Back", callback_data="recharge")
+        kb.button(text="📋 Copy Binance Pay ID", copy_text=CopyTextButton(text=str(BINANCE_PAY_ID)))
+        kb.button(text="✅ Verify Payment Now", callback_data="binance_verify_start")
+        kb.button(text="⬅️ Back to Deposit Menu", callback_data="recharge")
         kb.adjust(1)
         caption = (
-            "🅱️ <b>Binance Pay (Auto)</b>\n\n"
-            f"🆔 Pay ID: <code>{escape(str(BINANCE_PAY_ID))}</code>\n\n"
-            "<blockquote>Send payment to this Pay ID via Binance. Once done, tap "
-            "<b>Verify Payment</b> and send your Order ID or Transaction ID.</blockquote>"
+            "<h2>🅱️ Binance Pay Instant Deposit</h2>"
+            f"<blockquote>🆔 <b>Binance Pay ID:</b> <code>{escape(str(BINANCE_PAY_ID))}</code><br>"
+            f"💱 <b>Rate:</b> <code>1 USDT = ₹{USDT_TO_INR}</code></blockquote>"
+            "<blockquote>⚡ <b>How to Pay</b><br>"
+            "1. Open Binance App → Binance Pay → Send to the Pay ID above.<br>"
+            "2. Tap <b>✅ Verify Payment Now</b> below.<br>"
+            "3. Paste your Binance Order ID or Transaction ID for instant credit!</blockquote>"
         )
         if BINANCE_QR_URL:
             await cq.message.answer_photo(
@@ -1090,7 +1144,8 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
     @dp.callback_query(F.data == "binance_verify_start")
     async def binance_verify_start(cq: CallbackQuery, state: FSMContext):
         msg = await cq.message.answer(
-            "🆔 <b>Send your Binance Pay Order ID or Transaction ID</b>:",
+            "<h2>🆔 Verify Binance Pay Order</h2>"
+            "<blockquote>Paste your <b>Binance Pay Order ID</b> or <b>Transaction ID</b> below for instant verification:</blockquote>",
             parse_mode="HTML",
             reply_markup=_cancel_kb().as_markup(),
         )
@@ -1107,20 +1162,21 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         await state.clear()
 
         if not target:
-            await message.answer("❌ Invalid Order ID.", reply_markup=_cancel_kb().as_markup())
+            await message.answer("<h2>❌ Invalid Order ID</h2><blockquote>Please provide a valid Binance Order ID.</blockquote>", reply_markup=_cancel_kb().as_markup())
             return
 
         if txns_col.find_one({"_id": f"bnc_{target}"}):
             await message.answer(
-                "⚠️ This Order ID was already claimed.", reply_markup=_cancel_kb().as_markup()
+                "<h2>⚠️ Already Claimed</h2><blockquote>This Binance Order ID has already been credited.</blockquote>",
+                reply_markup=_cancel_kb().as_markup(),
             )
             return
 
-        wait_msg = await message.answer("⌛ <i>Checking Binance Pay…</i>", parse_mode="HTML")
+        wait_msg = await message.answer("⌛ <i>Verifying with Binance Pay…</i>", parse_mode="HTML")
         res = verify_binance_order(target)
         if not res.get("success"):
             await wait_msg.edit_text(
-                "❌ <b>Payment not found.</b> Make sure the ID is correct and try again in a minute.",
+                "<h2>❌ Payment Not Found</h2><blockquote>Please verify that your Order ID is accurate and try again in a moment.</blockquote>",
                 parse_mode="HTML",
                 reply_markup=_cancel_kb().as_markup(),
             )
@@ -1148,17 +1204,16 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             "created_at": now,
             "settled_at": now,
         })
-        users_col.update_one(
-            {"_id": message.from_user.id}, {"$inc": {"balance": amount_inr}}, upsert=True
+        new_balance = await _credit_user_and_referral(
+            message.from_user.id, amount_inr, "Binance Pay"
         )
-        new_balance = get_balance(message.from_user.id)
 
         await wait_msg.edit_text(
-            "✅ <b>Binance Pay Verified!</b>\n\n"
-            f"💰 Amount Credited: <b>₹{_fmt_amount(amount_inr, 2)}</b>\n"
-            f"🏦 New Balance: <b>₹{_fmt_amount(new_balance, 2)}</b>\n"
-            f"👤 Payer: <code>{escape(str(res.get('payer_name', 'N/A')))}</code>\n"
-            f"🆔 Order ID: <tg-spoiler><code>{escape(target)}</code></tg-spoiler>",
+            "<h2>✅ Binance Pay Deposit Verified!</h2>"
+            f"<blockquote>💰 <b>Amount Credited:</b> <code>₹{_fmt_amount(amount_inr, 2)}</code><br>"
+            f"🏦 <b>Updated Balance:</b> <code>₹{_fmt_amount(new_balance, 2)}</code><br>"
+            f"👤 <b>Payer:</b> <code>{escape(str(res.get('payer_name', 'N/A')))}</code><br>"
+            f"🆔 <b>Order ID:</b> <tg-spoiler><code>{escape(target)}</code></tg-spoiler></blockquote>",
             parse_mode="HTML",
             reply_markup=_cancel_kb().as_markup(),
         )
@@ -1183,8 +1238,11 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             return
         await _delete_message(cq.message)
         msg = await cq.message.answer(
-            f"🌐 <b>Other Crypto Coins</b>\n\n"
-            f"Enter amount in <b>USDT</b>\n<i>Minimum: {MIN_USDT} USDT</i>",
+            "<h2>🌐 Multi-Coin Crypto Deposit</h2>"
+            f"<blockquote>💱 <b>Rate:</b> <code>1 USDT = ₹{USDT_TO_INR}</code><br>"
+            f"💵 <b>Minimum Deposit:</b> <code>{MIN_USDT} USDT</code><br>"
+            "🪙 <b>Supported Coins:</b> USDT, TRX, TON, BTC, LTC, ETH, BNB &amp; more</blockquote>"
+            "<p>✍️ <i>Enter the deposit amount in <b>USDT</b>:</i></p>",
             parse_mode="HTML",
             reply_markup=_cancel_kb("recharge_crypto").as_markup(),
         )
@@ -1207,19 +1265,20 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         usdt = _parse_positive_amount(message.text)
         if usdt is None or usdt < MIN_USDT:
             msg = await message.answer(
-                f"❌ <b>Invalid amount.</b> Enter at least <u>{MIN_USDT} USDT</u>.",
+                "<h2>❌ Invalid Amount</h2>"
+                f"<blockquote>Please enter at least <b>{MIN_USDT} USDT</b>.</blockquote>",
                 parse_mode="HTML",
                 reply_markup=_cancel_kb("recharge_crypto").as_markup(),
             )
             await state.update_data(last_msg=msg.message_id)
             return
 
-        wait_msg = await message.answer("⌛ <i>Generating invoice…</i>", parse_mode="HTML")
+        wait_msg = await message.answer("⌛ <i>Generating crypto invoice…</i>", parse_mode="HTML")
         order_id = f"Oxa_{message.from_user.id}_{int(datetime.datetime.now().timestamp())}"
         res = create_invoice(usdt, order_id)
         if not res["success"]:
             await wait_msg.edit_text(
-                f"❌ <b>API Error:</b> {escape(str(res.get('error', 'Unable to create invoice')))}",
+                f"<h2>❌ Gateway Error</h2><blockquote>{escape(str(res.get('error', 'Unable to create invoice')))}</blockquote>",
                 parse_mode="HTML",
                 reply_markup=_cancel_kb("recharge_crypto").as_markup(),
             )
@@ -1241,19 +1300,22 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         })
 
         kb = InlineKeyboardBuilder()
-        kb.button(text="💳 Pay Now", url=pay_url)
-        kb.button(text="✅ I Have Paid", callback_data=f"check_crypto:{track_id}")
-        kb.button(text="❌ Cancel", callback_data=f"cancel_crypto:{track_id}")
-        kb.button(text="🔙 Back", callback_data="recharge_crypto")
+        kb.button(text="💳 Open Payment Page", url=pay_url)
+        kb.button(text="✅ I Have Paid — Check Status", callback_data=f"check_crypto:{track_id}")
+        kb.button(text="❌ Cancel Invoice", callback_data=f"cancel_crypto:{track_id}")
+        kb.button(text="⬅️ Back", callback_data="recharge_crypto")
         kb.adjust(1)
         await wait_msg.delete()
         await message.answer(
-            "🌐 <b>All Crypto Coins</b>\n\n"
-            f"💵 Amount: <b>{_fmt_amount(usdt)} USDT</b>\n"
-            f"💰 Wallet credit: ₹{_fmt_amount(inr_val, 2)}\n"
-            "⏳ Expires in: <i>30 minutes</i>\n\n"
-            "<blockquote>Send the <u>exact amount</u> shown on the payment page."
-            " Then tap <b>I Have Paid</b>.</blockquote>",
+            "<h2>🌐 Multi-Coin Crypto Invoice</h2>"
+            f"<blockquote>💵 <b>Invoice Amount:</b> <code>{_fmt_amount(usdt)} USDT</code><br>"
+            f"💰 <b>Wallet Credit:</b> <code>₹{_fmt_amount(inr_val, 2)}</code><br>"
+            f"🆔 <b>Track ID:</b> <code>{escape(track_id)}</code><br>"
+            "⏳ <b>Validity:</b> <code>30 minutes</code></blockquote>"
+            "<blockquote>⚡ <b>Instructions</b><br>"
+            "1. Tap <b>💳 Open Payment Page</b> and choose your coin/network.<br>"
+            "2. Send the exact amount shown on the checkout screen.<br>"
+            "3. Tap <b>✅ I Have Paid — Check Status</b> to credit your balance!</blockquote>",
             parse_mode="HTML",
             reply_markup=kb.as_markup(),
         )
@@ -1285,20 +1347,19 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             if getattr(result, "modified_count", 1) == 0:
                 await cq.answer("✅ Already credited!", show_alert=True)
                 return
-            users_col.update_one(
-                {"_id": inv["user_id"]}, {"$inc": {"balance": inv["amount_inr"]}}, upsert=True
-            )
             usdt = inv["amount_usdt"]
             inr = inv["amount_inr"]
-            new_balance = get_balance(inv["user_id"])
+            new_balance = await _credit_user_and_referral(
+                inv["user_id"], inr, "OxaPay Crypto"
+            )
             await _delete_message(cq.message)
             await bot.send_message(
                 inv["user_id"],
-                "✅ <b>Payment Received!</b>\n\n"
-                f"💵 Amount Added: <b>{_fmt_amount(usdt)} USDT</b>\n"
-                f"💰 INR Value: ₹{_fmt_amount(inr, 2)}\n"
-                f"🏦 New Balance: ₹{_fmt_amount(new_balance, 2)}\n"
-                f"➕ Track ID: <code>{escape(track_id)}</code>",
+                "<h2>✅ Crypto Deposit Confirmed!</h2>"
+                f"<blockquote>💵 <b>Amount Received:</b> <code>{_fmt_amount(usdt)} USDT</code><br>"
+                f"💰 <b>INR Credited:</b> <code>₹{_fmt_amount(inr, 2)}</code><br>"
+                f"🏦 <b>Updated Balance:</b> <code>₹{_fmt_amount(new_balance, 2)}</code><br>"
+                f"🆔 <b>Track ID:</b> <code>{escape(track_id)}</code></blockquote>",
                 parse_mode="HTML",
                 reply_markup=_cancel_kb().as_markup(),
             )
@@ -1313,7 +1374,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
                 f"🧾 <b>Track ID:</b> <code>{escape(track_id)}</code>"
             )
         elif remote_status == "confirming":
-            await cq.answer("⏳ Payment detected but still confirming on blockchain.", show_alert=True)
+            await cq.answer("⏳ Payment detected! Waiting for blockchain confirmation.", show_alert=True)
         else:
             await cq.answer(
                 f"Status: {escape(remote_status.capitalize())}\nPayment not confirmed yet.",
@@ -1333,8 +1394,6 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         networks = get_usdt_networks(settings_col)
         kb = InlineKeyboardBuilder()
 
-        # Keep the configured order for custom deployments, but put common
-        # networks in the same predictable order as the admin screen.
         ordered = [n for n in SUPPORTED_USDT_NETWORKS if n in networks]
         ordered.extend(n for n in networks if n not in ordered)
         for network in ordered:
@@ -1342,20 +1401,20 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
                 text=f"💵 {network}",
                 callback_data=f"usdt_network:{_network_token(network)}",
             )
-        kb.button(text="🔙 Back", callback_data="recharge_crypto")
+        kb.button(text="⬅️ Back to Crypto Menu", callback_data="recharge_crypto")
         kb.adjust(1)
 
         if networks:
             text = (
-                "💵 <b>USDT Deposit</b>\n\n"
-                "<blockquote><i>Select the network you will use.</i>\n"
-                "Only send USDT on the selected network; sending on another network may cause permanent loss.</blockquote>"
+                "<h2>💵 USDT Direct Network Deposit</h2>"
+                f"<blockquote>💱 <b>Rate:</b> <code>1 USDT = ₹{USDT_TO_INR}</code> · <b>Min:</b> <code>{MIN_USDT} USDT</code><br>"
+                "⚠️ <b>Important:</b> Always send USDT on the exact network you select below. Cross-network transfers cannot be recovered.</blockquote>"
+                "<p>👇 <i>Select your preferred USDT network:</i></p>"
             )
         else:
             text = (
-                "💵 <b>USDT Deposit</b>\n\n"
-                "<blockquote>⚠️ No USDT network is configured yet. Please contact "
-                "<u>Support</u>.</blockquote>"
+                "<h2>💵 USDT Deposit</h2>"
+                "<blockquote>⚠️ No USDT network is configured right now. Please contact <b>Support</b>.</blockquote>"
             )
 
         if edit:
@@ -1389,18 +1448,19 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         address = networks[network]
         await _delete_message(cq.message)
         kb = InlineKeyboardBuilder()
-        kb.button(text="Copy Address", copy_text=CopyTextButton(text=address))
-        kb.button(text="✅ I Have Paid", callback_data=f"usdt_paid:{_network_token(network)}")
-        kb.button(text="🔙 Back", callback_data="recharge_usdt")
+        kb.button(text="📋 Copy Deposit Address", copy_text=CopyTextButton(text=address))
+        kb.button(text="✅ I Have Paid — Submit TXID", callback_data=f"usdt_paid:{_network_token(network)}")
+        kb.button(text="⬅️ Change Network", callback_data="recharge_usdt")
         kb.adjust(1)
         text = (
-            "💵 <b>USDT Deposit</b>\n\n"
-            f"🌐 <b>Network:</b> <code>{escape(network)}</code>\n\n"
-            f"📍 <b>Address:</b> <tg-spoiler><code>{escape(address)}</code></tg-spoiler>\n\n"
-            "<blockquote>1. Copy the address.\n"
-            "2. Pay USDT on the <u>same network</u>.\n"
-            "3. After the payment arrives, tap <b>I Have Paid</b> and send the TXID.</blockquote>\n"
-            "⚠️ <i>Minimum deposit: 0.1 USDT. Network mismatch is not refundable.</i>"
+            f"<h2>💵 USDT Deposit — {escape(network)}</h2>"
+            f"<blockquote>🌐 <b>Selected Network:</b> <code>{escape(network)}</code><br>"
+            f"📍 <b>Deposit Address:</b><br><tg-spoiler><code>{escape(address)}</code></tg-spoiler><br>"
+            f"💵 <b>Minimum Deposit:</b> <code>{MIN_USDT} USDT</code> (<code>1 USDT = ₹{USDT_TO_INR}</code>)</blockquote>"
+            "<blockquote>⚡ <b>Steps to Credit Wallet</b><br>"
+            "1. Copy the deposit address above.<br>"
+            f"2. Send USDT on the <b>{escape(network)}</b> network only.<br>"
+            "3. Once confirmed, tap <b>✅ I Have Paid — Submit TXID</b> and paste your TXID.</blockquote>"
         )
         await cq.message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
         await cq.answer()
@@ -1413,8 +1473,9 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             await cq.answer("This network is no longer available.", show_alert=True)
             return
         msg = await cq.message.answer(
-            "🧾 <b>Send your USDT Transaction ID</b>\n\n"
-            "<i>Paste the TXID from your wallet. It will be checked automatically.</i>",
+            "<h2>🧾 Submit USDT Transaction ID (TXID)</h2>"
+            f"<blockquote>🌐 <b>Network:</b> <code>{escape(network)}</code><br>"
+            "Paste the blockchain <b>TXID / Hash</b> from your wallet below for instant automated verification:</blockquote>",
             parse_mode="HTML",
             reply_markup=_cancel_kb("recharge_usdt").as_markup(),
         )
@@ -1542,18 +1603,17 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             )
             return
 
-        users_col.update_one(
-            {"_id": message.from_user.id}, {"$inc": {"balance": amount_inr}}, upsert=True
-        )
-        new_balance = get_balance(message.from_user.id)
         network = escape(str(data.get("usdt_network") or "USDT"))
+        new_balance = await _credit_user_and_referral(
+            message.from_user.id, amount_inr, f"USDT ({network})"
+        )
         await wait_msg.edit_text(
-            "✅ <b>USDT Payment Received!</b>\n\n"
-            f"🌐 Network: <code>{network}</code>\n"
-            f"💵 Received: <b>{_fmt_amount(amount_usdt)} USDT</b>\n"
-            f"💰 Wallet credit: <b>₹{_fmt_amount(amount_inr, 2)}</b>\n"
-            f"🏦 New Balance: <b>₹{_fmt_amount(new_balance, 2)}</b>\n"
-            f"🧾 TXID: <tg-spoiler><code>{escape(txid)}</code></tg-spoiler>",
+            "<h2>✅ USDT Deposit Verified!</h2>"
+            f"<blockquote>🌐 <b>Network:</b> <code>{network}</code><br>"
+            f"💵 <b>Amount Received:</b> <code>{_fmt_amount(amount_usdt)} USDT</code><br>"
+            f"💰 <b>INR Credited:</b> <code>₹{_fmt_amount(amount_inr, 2)}</code><br>"
+            f"🏦 <b>Updated Balance:</b> <code>₹{_fmt_amount(new_balance, 2)}</code><br>"
+            f"🧾 <b>TXID:</b> <tg-spoiler><code>{escape(txid)}</code></tg-spoiler></blockquote>",
             parse_mode="HTML",
             reply_markup=_cancel_kb().as_markup(),
         )
@@ -1581,15 +1641,18 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         cwallet_id = str(settings.get("cwallet_manual_id") or "47588130")
         await _delete_message(cq.message)
         kb = InlineKeyboardBuilder()
-        kb.button(text="Copy Cwallet ID", copy_text=CopyTextButton(text=cwallet_id))
-        kb.button(text="🔙 Back", callback_data="recharge")
+        kb.button(text="📋 Copy Cwallet ID", copy_text=CopyTextButton(text=cwallet_id))
+        kb.button(text="⬅️ Back to Deposit Menu", callback_data="recharge")
         kb.adjust(1)
         msg = await cq.message.answer(
-            "🧾 <b>Cwallet (Manual)</b>\n\n"
-            f"🆔 Cwallet ID: <code>{escape(cwallet_id)}</code>\n\n"
-            "<blockquote>Pay USDT to this Cwallet ID.\n"
-            "Then enter the <u>exact amount paid</u>. Your screenshot will be reviewed by an admin.</blockquote>\n\n"
-            f"💵 Enter amount in <b>USDT</b> (minimum {MIN_USDT} USDT):",
+            "<h2>🧾 Cwallet ID Deposit (Manual)</h2>"
+            f"<blockquote>🆔 <b>Cwallet ID:</b> <code>{escape(cwallet_id)}</code><br>"
+            f"💱 <b>Rate:</b> <code>1 USDT = ₹{USDT_TO_INR}</code> · <b>Min:</b> <code>{MIN_USDT} USDT</code></blockquote>"
+            "<blockquote>⚡ <b>How to Pay</b><br>"
+            "1. Send USDT internally to the Cwallet ID above.<br>"
+            "2. Reply below with the exact <b>USDT amount</b> you sent.<br>"
+            "3. Upload your payment screenshot in the next step for admin approval.</blockquote>"
+            f"<p>✍️ <i>Enter the USDT amount sent (minimum {MIN_USDT} USDT):</i></p>",
             parse_mode="HTML",
             reply_markup=kb.as_markup(),
         )
@@ -1605,7 +1668,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         amount_usdt = _parse_positive_amount(message.text)
         if amount_usdt is None or amount_usdt < MIN_USDT:
             msg = await message.answer(
-                f"❌ <b>Invalid amount.</b> Enter at least <u>{MIN_USDT} USDT</u>.",
+                f"<h2>❌ Invalid Amount</h2><blockquote>Please enter at least <b>{MIN_USDT} USDT</b>.</blockquote>",
                 parse_mode="HTML",
                 reply_markup=_cancel_kb("recharge_cwallet_manual").as_markup(),
             )
@@ -1615,11 +1678,11 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         settings = get_settings(settings_col)
         cwallet_id = str(settings.get("cwallet_manual_id") or "47588130")
         msg = await message.answer(
-            "📸 <b>Send payment screenshot</b>\n\n"
-            f"🆔 Pay to: <code>{escape(cwallet_id)}</code>\n"
-            f"💵 Amount: <b>{_fmt_amount(amount_usdt)} USDT</b>\n\n"
-            "<blockquote>Upload a clear screenshot showing the payment details. "
-            "An admin will <u>Accept</u> or <u>Reject</u> the request.</blockquote>",
+            "<h2>📸 Upload Cwallet Payment Screenshot</h2>"
+            f"<blockquote>🆔 <b>Cwallet ID:</b> <code>{escape(cwallet_id)}</code><br>"
+            f"💵 <b>Amount Declared:</b> <code>{_fmt_amount(amount_usdt)} USDT</code></blockquote>"
+            "<blockquote>📤 Upload a clear screenshot showing the completed Cwallet transfer. "
+            "An administrator will verify and credit your wallet shortly.</blockquote>",
             parse_mode="HTML",
             reply_markup=_cancel_kb("recharge_cwallet_manual").as_markup(),
         )
@@ -1721,13 +1784,13 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
                     pass
 
         await message.answer(
-            "⏳ <b>Payment proof submitted</b>\n\n"
-            f"💵 Amount: <b>{_fmt_amount(amount_usdt)} USDT</b>\n"
-            f"🔖 Request ID: <tg-spoiler><code>{escape(request_id)}</code></tg-spoiler>\n\n"
+            "<h2>⏳ Cwallet Payment Proof Submitted</h2>"
+            f"<blockquote>💵 <b>Amount Declared:</b> <code>{_fmt_amount(amount_usdt)} USDT</code><br>"
+            f"🔖 <b>Request ID:</b> <tg-spoiler><code>{escape(request_id)}</code></tg-spoiler></blockquote>"
             + (
-                "<blockquote>An admin will review your screenshot and notify you after approval.</blockquote>"
+                "<blockquote>✅ <b>Under Review:</b> An administrator will verify your screenshot and credit your wallet shortly.</blockquote>"
                 if sent_to_admin
-                else "<blockquote>Your request is saved. Please contact Support because no admin notification was delivered.</blockquote>"
+                else "<blockquote>⚠️ Your request is saved, but admin notification failed. Please contact Support.</blockquote>"
             ),
             parse_mode="HTML",
             reply_markup=_cancel_kb().as_markup(),
@@ -1775,18 +1838,17 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
                 return
 
             amount_inr = float(tx.get("amount_inr") or tx.get("amount") or 0)
-            users_col.update_one(
-                {"_id": tx["user_id"]}, {"$inc": {"balance": amount_inr}}, upsert=True
+            new_balance = await _credit_user_and_referral(
+                tx["user_id"], amount_inr, "Cwallet Manual"
             )
-            new_balance = get_balance(tx["user_id"])
             try:
                 await bot.send_message(
                     tx["user_id"],
-                    "✅ <b>Manual Payment Approved</b>\n\n"
-                    f"💵 Amount: <b>{_fmt_amount(tx.get('amount_usdt'))} USDT</b>\n"
-                    f"💰 Wallet credit: <b>₹{_fmt_amount(amount_inr, 2)}</b>\n"
-                    f"🏦 New Balance: <b>₹{_fmt_amount(new_balance, 2)}</b>\n"
-                    f"🔖 Request ID: <code>{escape(request_id)}</code>",
+                    "<h2>✅ Manual Payment Approved</h2>"
+                    f"<blockquote>💵 <b>Amount:</b> <code>{_fmt_amount(tx.get('amount_usdt'))} USDT</code>\n"
+                    f"💰 <b>Wallet Credit:</b> <code>₹{_fmt_amount(amount_inr, 2)}</code>\n"
+                    f"🏦 <b>New Balance:</b> <code>₹{_fmt_amount(new_balance, 2)}</code>\n"
+                    f"🔖 <b>Request ID:</b> <code>{escape(request_id)}</code></blockquote>",
                     parse_mode="HTML",
                     reply_markup=_cancel_kb().as_markup(),
                 )
@@ -1822,8 +1884,8 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             try:
                 await bot.send_message(
                     tx["user_id"],
-                    "❌ <b>Manual Payment Rejected</b>\n\n"
-                    "No balance was added. Please check that the screenshot is clear and the payment was sent to the correct Cwallet ID, then contact Support.",
+                    "<h2>❌ Manual Payment Rejected</h2>"
+                    "<blockquote>No balance was added. Please check that the screenshot is clear and the payment was sent to the correct Cwallet ID, then contact Support.</blockquote>",
                     parse_mode="HTML",
                     reply_markup=_cancel_kb().as_markup(),
                 )
@@ -1877,17 +1939,16 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
                 await cq.answer("This request was already processed.", show_alert=True)
                 return
 
-            users_col.update_one(
-                {"_id": tx["user_id"]}, {"$inc": {"balance": amount}}, upsert=True
+            new_balance = await _credit_user_and_referral(
+                tx["user_id"], amount, "Manual UPI"
             )
-            new_balance = get_balance(tx["user_id"])
             try:
                 await bot.send_message(
                     tx["user_id"],
-                    "✅ <b>Manual UPI Payment Approved</b>\n\n"
-                    f"💰 Amount Added: <b>₹{_fmt_amount(amount, 2)}</b>\n"
-                    f"🏦 New Balance: <b>₹{_fmt_amount(new_balance, 2)}</b>\n"
-                    f"🔖 Request ID: <code>{escape(request_id)}</code>",
+                    "<h2>✅ Manual UPI Payment Approved</h2>"
+                    f"<blockquote>💰 <b>Amount Added:</b> <code>₹{_fmt_amount(amount, 2)}</code>\n"
+                    f"🏦 <b>New Balance:</b> <code>₹{_fmt_amount(new_balance, 2)}</code>\n"
+                    f"🔖 <b>Request ID:</b> <code>{escape(request_id)}</code></blockquote>",
                     parse_mode="HTML",
                     reply_markup=_cancel_kb().as_markup(),
                 )
@@ -1996,20 +2057,30 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         combined.sort(key=lambda item: item["date"] or datetime.datetime.min, reverse=True)
         combined = combined[:HISTORY_LIMIT]
         if not combined:
-            text = "📜 <b>Recharge History</b>\n\n<blockquote>No successful recharges yet.</blockquote>"
+            text = (
+                "<h2>📜 Wallet Deposit History</h2>"
+                "<blockquote>📭 No completed deposits found on your account yet.</blockquote>"
+            )
         else:
-            lines = ["📜 <b>Recharge History</b>\n"]
+            rows = []
+            total_shown = 0.0
             for tx in combined:
                 date_value = tx["date"]
                 date_str = date_value.strftime("%d %b %Y, %I:%M %p") if date_value else "N/A"
-                lines.append(
-                    f"• <b>{escape(str(tx['method']))}</b> — ₹{_fmt_amount(tx['amount'], 2)}\n"
-                    f"  <code>{escape(date_str)}</code>"
+                amt = float(tx["amount"] or 0)
+                total_shown += amt
+                rows.append(
+                    f"• <b>{escape(str(tx['method']))}</b> — <code>₹{_fmt_amount(amt, 2)}</code> "
+                    f"(<i>{escape(date_str)}</i>)"
                 )
-            text = "\n".join(lines)
+            text = (
+                f"<h2>📜 Wallet Deposit History (Last {len(combined)})</h2>"
+                f"<blockquote>{'<br>'.join(rows)}</blockquote>"
+                f"<p>💰 <i>Recent Total Shown: <b>₹{_fmt_amount(total_shown, 2)}</b></i></p>"
+            )
 
         await state.clear()
-        kb = _back_kb("recharge")
+        kb = _back_kb("recharge", text="⬅️ Back to Deposit Menu")
         try:
             await cq.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
         except Exception:
@@ -2071,10 +2142,9 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
 
         if extra_set:
             tx.update(extra_set)
-        users_col.update_one(
-            {"_id": tx["user_id"]}, {"$inc": {"balance": tx["amount"]}}, upsert=True
+        new_balance = await _credit_user_and_referral(
+            tx["user_id"], float(tx["amount"]), method_label
         )
-        new_balance = get_balance(tx["user_id"])
         from_user = event.from_user
         _remember_user_profile(tx["user_id"], from_user)
         source_message = event.message if isinstance(event, CallbackQuery) else event
@@ -2100,11 +2170,11 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
 
         await bot.send_message(
             tx["user_id"],
-            "✅ <b>Payment Verified!</b>\n\n"
-            f"💳 Method: <b>{escape(method_label)}</b>\n"
-            f"💰 Amount Added: <b>₹{_fmt_amount(tx['amount'], 2)}</b>\n"
-            f"🏦 New Balance: <b>₹{_fmt_amount(new_balance, 2)}</b>\n"
-            f"{order_line}",
+            "<h2>✅ Deposit Verified &amp; Credited!</h2>"
+            f"<blockquote>💳 <b>Gateway:</b> <code>{escape(method_label)}</code><br>"
+            f"💰 <b>Amount Added:</b> <code>₹{_fmt_amount(tx['amount'], 2)}</code><br>"
+            f"🏦 <b>Updated Balance:</b> <code>₹{_fmt_amount(new_balance, 2)}</code><br>"
+            f"{order_line}</blockquote>",
             parse_mode="HTML",
             reply_markup=_cancel_kb().as_markup(),
         )
@@ -2160,7 +2230,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             text=f"🏦 Manual UPI: {'ON ✅' if settings.get('manual_upi_enabled', False) else 'OFF ❌'}",
             callback_data="pset_toggle:manual_upi",
         )
-        kb.button(text="⚙️ USDT network addresses", callback_data="pset_usdt_networks")
+        kb.button(text="⚙️ USDT Network Addresses", callback_data="pset_usdt_networks")
         kb.button(
             text=f"🆔 Manual Cwallet ID: {str(settings.get('cwallet_manual_id', '47588130'))[:20]}",
             callback_data="pset_manual_id",
@@ -2170,15 +2240,16 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             callback_data="pset_manual_upi_id",
         )
         kb.button(
-            text=f"👤 Manual UPI name: {str(settings.get('manual_upi_name') or 'Not set')[:20]}",
+            text=f"👤 Manual UPI Name: {str(settings.get('manual_upi_name') or 'Not set')[:20]}",
             callback_data="pset_manual_upi_name",
         )
         kb.button(
             text="📷 Set/Replace Manual UPI QR",
             callback_data="pset_manual_upi_qr",
         )
-        kb.button(text="🔙 Close", callback_data="pset_close")
-        kb.adjust(2, 1, 2, 2, 1, 1, 1, 2, 1, 1)
+        kb.button(text="⬅️ Admin Panel", callback_data="admin_refresh")
+        kb.button(text="❌ Close", callback_data="pset_close")
+        kb.adjust(2, 1, 2, 2, 1, 1, 1, 2, 1, 2)
         return kb
 
     async def show_payment_settings(target, state: FSMContext | None = None, edit=False):
@@ -2188,17 +2259,19 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         configured_count = len(get_usdt_networks(settings_col))
         manual_qr_status = "Set ✅" if settings.get("manual_upi_qr_file_id") else "Not set ❌"
         text = (
-            "⚙️ <b>Payment Gateway Settings</b>\n\n"
-            "<blockquote>"
-            f"INR gateway: <b>{escape(str(settings.get('active_inr_gateway') or 'Disabled').upper())}</b>\n"
-            f"USDT networks configured: <b>{configured_count}</b>\n"
-            f"Manual Cwallet ID: <code>{escape(str(settings.get('cwallet_manual_id', '47588130')))}</code>\n"
-            f"Manual UPI status: <b>{'ON' if settings.get('manual_upi_enabled', False) else 'OFF'}</b>\n"
-            f"Manual UPI ID: <code>{escape(str(settings.get('manual_upi_id') or 'Not set'))}</code>\n"
-            f"Manual UPI payee: <b>{escape(str(settings.get('manual_upi_name') or 'Not set'))}</b>\n"
-            f"Manual UPI QR: <b>{manual_qr_status}</b>"
-            "</blockquote>\n"
-            "<i>Tap a switch to turn a method on or off. Secrets such as the API key stay in config/env.</i>"
+            "<h2>💳 Payment Gateway Control Center</h2>"
+            "<blockquote>⚡ <b>Automated Gateways</b><br>"
+            f"• <b>Active INR Gateway:</b> <code>{escape(str(settings.get('active_inr_gateway') or 'Disabled').upper())}</code><br>"
+            f"• <b>Binance Pay:</b> <code>{'ON ✅' if settings.get('binance_enabled', True) else 'OFF ❌'}</code><br>"
+            f"• <b>Crypto Menu (OxaPay):</b> <code>{'ON ✅' if settings.get('crypto_enabled', True) else 'OFF ❌'}</code><br>"
+            f"• <b>USDT Auto (Cwallet):</b> <code>{'ON ✅' if settings.get('usdt_enabled', True) else 'OFF ❌'}</code> (<code>{configured_count}</code> networks)</blockquote>"
+            "<blockquote>🧾 <b>Manual Approval Gateways</b><br>"
+            f"• <b>Cwallet Manual:</b> <code>{'ON ✅' if settings.get('cwallet_manual_enabled', True) else 'OFF ❌'}</code> (ID: <code>{escape(str(settings.get('cwallet_manual_id', '47588130')))}</code>)<br>"
+            f"• <b>Manual UPI:</b> <code>{'ON ✅' if settings.get('manual_upi_enabled', False) else 'OFF ❌'}</code><br>"
+            f"• <b>Manual UPI ID:</b> <code>{escape(str(settings.get('manual_upi_id') or 'Not set'))}</code><br>"
+            f"• <b>Manual UPI Payee:</b> <code>{escape(str(settings.get('manual_upi_name') or 'Not set'))}</code><br>"
+            f"• <b>Manual UPI QR:</b> <code>{manual_qr_status}</code></blockquote>"
+            "<p>🎛️ <i>Tap any switch below to toggle gateways or configure deposit details:</i></p>"
         )
         kb = _settings_kb(settings)
         if edit:
@@ -2568,7 +2641,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             return
         await show_payment_settings(message, state=state, edit=False)
 
-    @dp.callback_query(F.data == "pset_back")
+    @dp.callback_query(F.data.in_(("pset_back", "ps:home")))
     async def pset_back(cq: CallbackQuery, state: FSMContext):
         if not is_admin(cq.from_user.id):
             await cq.answer("Not authorized.", show_alert=True)
@@ -2587,17 +2660,16 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
     # BACKGROUND AUTO-SWEEPER
     # ==============================
     async def _auto_notify(tx: dict, amount: float, method_label: str):
-        users_col.update_one(
-            {"_id": tx["user_id"]}, {"$inc": {"balance": amount}}, upsert=True
+        new_balance = await _credit_user_and_referral(
+            tx["user_id"], float(amount), method_label
         )
-        new_balance = get_balance(tx["user_id"])
         await bot.send_message(
             tx["user_id"],
-            "✅ <b>Auto-Verified!</b>\n\n"
-            f"💳 Method: <b>{escape(method_label)}</b>\n"
-            f"💰 Amount Added: <b>₹{_fmt_amount(amount, 2)}</b>\n"
-            f"🏦 New Balance: <b>₹{_fmt_amount(new_balance, 2)}</b>\n"
-            f"🆔 Order ID: <code>{escape(str(tx['_id']))}</code>",
+            "<h2>✅ Payment Auto-Verified!</h2>"
+            f"<blockquote>💳 <b>Method:</b> {escape(method_label)}\n"
+            f"💰 <b>Amount Added:</b> <code>₹{_fmt_amount(amount, 2)}</code>\n"
+            f"🏦 <b>New Balance:</b> <code>₹{_fmt_amount(new_balance, 2)}</code>\n"
+            f"🆔 <b>Order ID:</b> <code>{escape(str(tx['_id']))}</code></blockquote>",
             parse_mode="HTML",
             reply_markup=_cancel_kb().as_markup(),
         )
