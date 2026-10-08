@@ -1,0 +1,61 @@
+{
+  "name": "VTH Account Selling Bot",
+  "description": "Telegram bot for selling readymade accounts.",
+  "logo": "https://files.catbox.moe/scgaoh.jpg",
+  "keywords": [
+    "python",
+    "telegram",
+    "bot",
+    "otp",
+    "heroku"
+  ],
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Telegram Bot Token from @BotFather",
+      "value": "",
+      "required": true
+    },
+    "ADMIN_IDS": {
+      "description": "Admin Telegram IDs (comma separated, e.g. 123456789,987654321)",
+      "value": "",
+      "required": true
+    },
+    "DATABASE_URL": {
+      "description": "Database connection URL (e.g. Postgres, Mongo, or SQLite)",
+      "value": "sqlite:///data.db",
+      "required": false
+    },
+    "API_ID": {
+      "description": "API Id from telegram.org",
+      "value": "",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Api_hash from telegram.org",
+      "value": "",
+      "required": true
+    },
+    "DEFAULT_CURRENCY": {
+      "description": "Default currency code (e.g. INR, USD)",
+      "value": "INR",
+      "required": false
+    },
+    "MIN_BALANCE_REQUIRED": {
+      "description": "Minimum balance required for users to use the bot",
+      "value": "0",
+      "required": false
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "stack": "heroku-22"
+}
