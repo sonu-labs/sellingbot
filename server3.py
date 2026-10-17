@@ -21,6 +21,7 @@ from rich_messages import (
     wa_icon,
     premium_button,
     safe_edit_or_send,
+    plain_country_label,
 )
 
 TEMPORASMS_BASE = "https://api.temporasms.com/stubs/handler_api.php"
@@ -862,7 +863,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             )
         kb = InlineKeyboardBuilder()
         for c in countries:
-            kb.button(text=c['name'], callback_data=f"s3_user_ops:{category}:{c['_id']}")
+            kb.button(text=plain_country_label(c['name']), callback_data=f"s3_user_ops:{category}:{c['_id']}")
         kb.adjust(2)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="back_main"))
         text = (
@@ -1284,7 +1285,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             return "<h2>📭 No Countries Found</h2><p>No countries matched your search query.</p>", kb.as_markup()
 
         for c in page_items:
-            btn_text = f"{c['flag']} {c['name']}"
+            btn_text = plain_country_label(c['name'])
             kb.button(text=btn_text, callback_data=f"s3tg_country:{c['code']}:0")
         kb.adjust(2)
 
@@ -1321,7 +1322,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             countries = list(s3_catalog.aggregate(pipeline))
             kb = InlineKeyboardBuilder()
             for c in countries:
-                kb.button(text=c['name'], callback_data=f"s3_user_ops:wa:{c['_id']}")
+                kb.button(text=plain_country_label(c['name']), callback_data=f"s3_user_ops:wa:{c['_id']}")
             kb.adjust(2)
             kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="back_main"))
             text = (

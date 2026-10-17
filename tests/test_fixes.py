@@ -73,6 +73,25 @@ class PremiumEmojiTests(unittest.TestCase):
             self.assertIsNone(EMOJI_CLUSTER.search(btn.text), label)
             self.assertTrue(btn.icon_custom_emoji_id, label)
 
+    def test_country_list_buttons_have_no_premium_emoji(self):
+        # Owner request: country lists are plain (no premium icon per country
+        # row), everywhere else buttons keep their premium icon.
+        from aiogram.types import InlineKeyboardButton
+
+        for raw in ("India 🇮🇳", "🌍 United States", "India"):
+            label = rm.plain_country_label(raw)
+            self.assertIsNone(EMOJI_CLUSTER.search(label))
+            btn = rm.premium_button(
+                InlineKeyboardButton(text=f"{label} (₹100.00)", callback_data="country:x")
+            )
+            self.assertIsNone(btn.icon_custom_emoji_id, raw)
+            self.assertIn(label, btn.text)
+
+        other = rm.premium_button(
+            InlineKeyboardButton(text="💳 Recharge", callback_data="recharge")
+        )
+        self.assertTrue(other.icon_custom_emoji_id)
+
     def test_callback_toast_has_no_emoji(self):
         from aiogram.methods import AnswerCallbackQuery
 

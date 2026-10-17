@@ -5,7 +5,7 @@ A production-ready Telegram marketplace bot for digital accounts, social-media s
 ## Highlights
 
 - **Native Telegram Rich Messages** (Bot API 10.3) for text, edits and media blocks, with automatic classic fallback
-- **Premium custom emoji only** in message text, media captions and buttons, loaded from the bundled `EMOJI_IDS` packs — emojis without a Premium ID (flags, etc.) are automatically replaced with a Premium fallback, and callback toasts (which cannot carry custom emoji) are shown without emoji
+- **Premium custom emoji only** in message text, media captions and buttons, loaded from the bundled `EMOJI_IDS` packs — emojis without a Premium ID (flags, etc.) are automatically replaced with a Premium fallback, and callback toasts (which cannot carry custom emoji) are shown without emoji. The one exception is **country lists**: country buttons are plain country names with no per-country Premium icon (every other button keeps its Premium icon)
 - Official bot username: **@TGAStoreAPIBot**
 - **$1 = ₹100** everywhere: Server 2 / Server 3 prices, wallet USD display, display-currency conversion and USDT/crypto deposits all use the same 100 rate
 - **Referral Commission** (not a deposit commission): when a referred user deposits, the *referrer* earns the admin-set `refer_commission_percent` % of that deposit; the depositor receives only their own deposit. Set it from **Admin → Refer & Commission** or `/setrefercomm <percent>`

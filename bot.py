@@ -62,6 +62,7 @@ from rich_messages import (
     upi_icon,
     premium_button,
     safe_edit_or_send,
+    plain_country_label,
 )
 from i18n import LANGUAGES, CURRENCIES, tr, format_balance, language_name
 
@@ -1448,7 +1449,7 @@ async def callback_buy_server2(cq: CallbackQuery):
     disc = get_user_discount(cq.from_user.id)
     for c in page_items:
         inr_price = apply_user_discount(c['price'] * USD_TO_INR, cq.from_user.id)
-        btn_text = f"{c['name']} (₹{inr_price:.2f})"
+        btn_text = f"{plain_country_label(c['name'])} (₹{inr_price:.2f})"
         kb.button(text=btn_text, callback_data=f"srv2_info:{c['code']}:{c['price']:.4f}")
     kb.adjust(2)
     
@@ -1529,7 +1530,7 @@ async def srv2_do_search(msg: Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     for c in results[:20]:
         inr_price = apply_user_discount(c['price'] * USD_TO_INR, msg.from_user.id)
-        kb.button(text=f"{c['name']} (₹{inr_price:.2f})", callback_data=f"srv2_info:{c['code']}:{c['price']:.4f}")
+        kb.button(text=f"{plain_country_label(c['name'])} (₹{inr_price:.2f})", callback_data=f"srv2_info:{c['code']}:{c['price']:.4f}")
     kb.adjust(2)
     
     # Large buttons for search results navigation
@@ -1901,7 +1902,7 @@ async def send_country_menu(cq: CallbackQuery, page: int = 0):
     kb = InlineKeyboardBuilder()
     for c in paginated:
         c_price = apply_user_discount(c.get('price', 0), user)
-        kb.button(text=f"{html.escape(c['name'])} (₹{c_price:g})", callback_data=f"country:{c['name']}")
+        kb.button(text=f"{html.escape(plain_country_label(c['name']))} (₹{c_price:g})", callback_data=f"country:{c['name']}")
     kb.adjust(2)
 
     # Navigation buttons
@@ -2153,7 +2154,7 @@ async def cmd_add_start(msg: Message, state: FSMContext):
         return await msg.answer("❌ No countries found. Add some countries first in DB.")
     kb = InlineKeyboardBuilder()
     for c in countries:
-        kb.button(text=c["name"], callback_data=f"add_country:{c['name']}")
+        kb.button(text=plain_country_label(c["name"]), callback_data=f"add_country:{c['name']}")
     kb.adjust(2)
     await msg.answer("🌍 Select the country you want to add a number for:", reply_markup=kb.as_markup())
     await state.set_state(AddSession.waiting_country)
@@ -2370,7 +2371,7 @@ async def cmd_remove_start(msg: Message, state: FSMContext):
 
     kb = InlineKeyboardBuilder()
     for c in countries:
-        kb.button(text=c["name"], callback_data=f"remove_country:{c['name']}")
+        kb.button(text=plain_country_label(c["name"]), callback_data=f"remove_country:{c['name']}")
     kb.adjust(2)
 
     await msg.answer("🌍 Select country to remove number from:", reply_markup=kb.as_markup())
@@ -2446,7 +2447,7 @@ async def cmd_remove_country(msg: Message):
 
     kb = InlineKeyboardBuilder()
     for c in countries:
-        kb.button(text=c["name"], callback_data=f"removecountry:{c['name']}")
+        kb.button(text=plain_country_label(c["name"]), callback_data=f"removecountry:{c['name']}")
     kb.adjust(2)
     await msg.answer("🌍 Select a country to remove:", reply_markup=kb.as_markup())
 
@@ -3611,7 +3612,7 @@ async def cmd_edit_country(msg: Message, state: FSMContext):
         return await msg.answer("📭 No countries to edit.")
     kb = InlineKeyboardBuilder()
     for c in countries:
-        kb.button(text=c["name"], callback_data=f"editcountry:{c['name']}")
+        kb.button(text=plain_country_label(c["name"]), callback_data=f"editcountry:{c['name']}")
     kb.adjust(2)
     await msg.answer("🌍 Select a country to edit:", reply_markup=kb.as_markup())
 
@@ -5999,7 +6000,7 @@ async def admin_stock_action(cq: CallbackQuery, state: FSMContext):
             return await cq.message.edit_text("<h2>❌ No Countries</h2><blockquote>Add a country first before adding numbers.</blockquote>", reply_markup=back_kb)
         kb = InlineKeyboardBuilder()
         for c in countries:
-            kb.button(text=c["name"], callback_data=f"add_country:{c['name']}")
+            kb.button(text=plain_country_label(c["name"]), callback_data=f"add_country:{c['name']}")
         kb.adjust(2)
         kb.row(InlineKeyboardButton(text="⬅️ Back to Stock", callback_data="admin_open:stock"))
         await cq.message.edit_text(
@@ -6015,7 +6016,7 @@ async def admin_stock_action(cq: CallbackQuery, state: FSMContext):
             return await cq.message.edit_text("<h2>❌ No Countries</h2><blockquote>No countries found in database.</blockquote>", reply_markup=back_kb)
         kb = InlineKeyboardBuilder()
         for c in countries:
-            kb.button(text=c["name"], callback_data=f"remove_country:{c['name']}")
+            kb.button(text=plain_country_label(c["name"]), callback_data=f"remove_country:{c['name']}")
         kb.adjust(2)
         kb.row(InlineKeyboardButton(text="⬅️ Back to Stock", callback_data="admin_open:stock"))
         await cq.message.edit_text(
@@ -6056,7 +6057,7 @@ async def admin_stock_action(cq: CallbackQuery, state: FSMContext):
             return await cq.message.edit_text("<h2>📭 No Countries</h2><blockquote>No countries available to edit.</blockquote>", reply_markup=back_kb)
         kb = InlineKeyboardBuilder()
         for c in countries:
-            kb.button(text=c["name"], callback_data=f"editcountry:{c['name']}")
+            kb.button(text=plain_country_label(c["name"]), callback_data=f"editcountry:{c['name']}")
         kb.adjust(2)
         kb.row(InlineKeyboardButton(text="⬅️ Back to Stock", callback_data="admin_open:stock"))
         await cq.message.edit_text(
@@ -6071,7 +6072,7 @@ async def admin_stock_action(cq: CallbackQuery, state: FSMContext):
             return await cq.message.edit_text("<h2>📭 No Countries</h2><blockquote>No countries available to remove.</blockquote>", reply_markup=back_kb)
         kb = InlineKeyboardBuilder()
         for c in countries:
-            kb.button(text=c["name"], callback_data=f"removecountry:{c['name']}")
+            kb.button(text=plain_country_label(c["name"]), callback_data=f"removecountry:{c['name']}")
         kb.adjust(2)
         kb.row(InlineKeyboardButton(text="⬅️ Back to Stock", callback_data="admin_open:stock"))
         await cq.message.edit_text(

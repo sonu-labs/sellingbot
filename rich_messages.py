@@ -302,6 +302,20 @@ def strip_plain_emoji(text: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
 
+def plain_country_label(name: object) -> str:
+    """Clean label for a country-list button: country name only, no emoji.
+
+    Country lists are the one place the owner does not want a Premium emoji
+    on every row — a repeated globe/flag icon on 20+ country buttons is just
+    noise.  Stripping every emoji here also means ``premium_button`` finds no
+    emoji in the label and therefore attaches no Premium icon, while every
+    other (non-country-list) button keeps its Premium icon as before.
+    """
+    label = strip_plain_emoji(str(name or ""))
+    label = re.sub(r"\s+", " ", label).strip(" ·-")
+    return label or "Country"
+
+
 def emoji_id(emoji: str) -> str | None:
     """Return a Premium custom-emoji id for a Unicode emoji, if supplied."""
     return (
