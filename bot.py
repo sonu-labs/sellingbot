@@ -47,7 +47,8 @@ from mustjoin import (
 from config import (
     BOT_TOKEN, ADMIN_IDS, MONGO_URI, BOT_USERNAME, SUPPORT_USERNAME,
     UPDATES_CHANNEL, SALES_LOG_CHANNEL, ADMIN_LOG_ID, SALES_LOG_ID,
-    TEMPORASMS_API_KEY,
+    TEMPORASMS_API_KEY, TGLION_API_KEY, TGLION_ID, TGPVA_API_KEY,
+    USD_TO_INR,
 )
 from rich_messages import (
     RichBot,
@@ -682,7 +683,7 @@ async def reward_referral_if_eligible(user_id: int, display_name: str):
                 f"<blockquote>👤 <b>Friend:</b> {escape(str(display_name))}<br>"
                 f"💰 <b>Join Bonus Credited:</b> <code>+₹{refer_bonus:.2f}</code><br>"
                 f"🏦 <b>Updated Balance:</b> <code>₹{new_ref_balance:.2f}</code></blockquote>"
-                "<p>✨ <i>Plus you earn commission on every deposit your referral makes!</i></p>"
+                "<p>✨ <i>Plus you earn Referral Commission on every deposit your referral makes!</i></p>"
             ),
             parse_mode="HTML",
         )
@@ -804,15 +805,16 @@ async def cmd_start(m: Message):
             [InlineKeyboardButton(text="Open Website", url="https://tga-store.vercel.app")]
         ])
         await m.answer(
-            f"Account Created Successfully!\n\n"
-            f"User ID: <code>{m.from_user.id}</code>\n"
-            f"Password: <span class=\"tg-spoiler\"><code>{new_pwd}</code></span>\n\n"
-            f"Tap to reveal. Login on website with User ID and Password.",
+            "<h2>✅ Website Account Created Successfully!</h2>"
+            f"<blockquote>🆔 <b>User ID:</b> <code>{m.from_user.id}</code><br>"
+            f"🔐 <b>Password:</b> <span class=\"tg-spoiler\"><code>{new_pwd}</code></span></blockquote>"
+            "<p>👆 <i>Tap to reveal. Log in on the website with your User ID and Password.</i></p>",
             parse_mode="HTML",
             reply_markup=kb
         )
         try:
-            await bot.send_message(ADMINLOG, f"New Telegram Register\n\nUser: @{m.from_user.username or 'N/A'} (<code>{m.from_user.id}</code>)\nPassword: <code>{new_pwd}</code>", parse_mode="HTML")
+            # Never log a user's password — only log that a registration happened.
+            await bot.send_message(ADMINLOG, f"<h2>✅ New Website Registration</h2><blockquote>👤 <b>User:</b> @{m.from_user.username or 'N/A'} (<code>{m.from_user.id}</code>)</blockquote>", parse_mode="HTML")
         except:
             pass
         return
@@ -1091,77 +1093,76 @@ async def cmd_balance(msg: Message):
         reply_markup=kb,
     )
 # ================= API Configuration (Server 2) =================
-TGLION_API_KEY = "C80mflegScDkM51bzH"
-TGLION_ID = "7888066934"
-TGPVA_API_KEY = "862Ddu3tLbHGpyYGK5BZhmavl3ljxRsF"
+# TGLION_API_KEY / TGLION_ID / TGPVA_API_KEY are imported from config.py and
+# must only be set through environment variables — never hard-code API keys.
 
 # --- MASTER COUNTRY MAPPER (250+ COUNTRIES & TERRITORIES) ---
 ISO_COUNTRY_MAP = {
-    "AF": "Afghanistan 🇦🇫", "AX": "Åland Islands 🇦🇽", "AL": "Albania 🇦🇱", "DZ": "Algeria 🇩🇿",
-    "AS": "American Samoa 🇦🇸", "AD": "Andorra 🇦🇩", "AO": "Angola 🇦🇴", "AI": "Anguilla 🇦🇮",
-    "AQ": "Antarctica 🇦🇶", "AG": "Antigua & Barbuda 🇦🇬", "AR": "Argentina 🇦🇷", "AM": "Armenia 🇦🇲",
-    "AW": "Aruba 🇦🇼", "AU": "Australia 🇦🇺", "AT": "Austria 🇦🇹", "AZ": "Azerbaijan 🇦🇿",
-    "BS": "Bahamas 🇧🇸", "BH": "Bahrain 🇧🇭", "BD": "Bangladesh 🇧🇩", "BB": "Barbados 🇧🇧",
-    "BY": "Belarus 🇧🇾", "BE": "Belgium 🇧🇪", "BZ": "Belize 🇧🇿", "BJ": "Benin 🇧🇯",
-    "BM": "Bermuda 🇧🇲", "BT": "Bhutan 🇧🇹", "BO": "Bolivia 🇧🇴", "BQ": "Caribbean Netherlands 🇧🇶",
-    "BA": "Bosnia & Herzegovina 🇧🇦", "BW": "Botswana 🇧🇼", "BV": "Bouvet Island 🇧🇻", "BR": "Brazil 🇧🇷",
-    "IO": "British Indian Ocean Territory 🇮🇴", "VG": "British Virgin Islands 🇻🇬", "BN": "Brunei 🇧🇳",
-    "BG": "Bulgaria 🇧🇬", "BF": "Burkina Faso 🇧🇫", "BI": "Burundi 🇧🇮", "CV": "Cabo Verde 🇨🇻",
-    "KH": "Cambodia 🇰🇭", "CM": "Cameroon 🇨🇲", "CA": "Canada 🇨🇦", "KY": "Cayman Islands 🇰🇾",
-    "CF": "Central African Republic 🇨🇫", "TD": "Chad 🇹🇩", "CL": "Chile 🇨🇱", "CN": "China 🇨🇳",
-    "CX": "Christmas Island 🇨🇽", "CC": "Cocos (Keeling) Islands 🇨🇨", "CO": "Colombia 🇨🇴",
-    "KM": "Comoros 🇰🇲", "CD": "Congo (DRC) 🇨🇩", "CG": "Congo (Republic) 🇨🇬", "CK": "Cook Islands 🇨🇰",
-    "CR": "Costa Rica 🇨🇷", "HR": "Croatia 🇭🇷", "CU": "Cuba 🇨🇺", "CW": "Curaçao 🇨🇼",
-    "CY": "Cyprus 🇨🇾", "CZ": "Czechia 🇨🇿", "CI": "Côte d'Ivoire 🇨🇮", "DK": "Denmark 🇩🇰",
-    "DJ": "Djibouti 🇩🇯", "DM": "Dominica 🇩🇲", "DO": "Dominican Republic 🇩🇴", "EC": "Ecuador 🇪🇨",
-    "EG": "Egypt 🇪🇬", "SV": "El Salvador 🇸🇻", "GQ": "Equatorial Guinea 🇬🇶", "ER": "Eritrea 🇪🇷",
-    "EE": "Estonia 🇪🇪", "SZ": "Eswatini 🇸🇿", "ET": "Ethiopia 🇪🇹", "FK": "Falkland Islands 🇫🇰",
-    "FO": "Faroe Islands 🇫🇴", "FJ": "Fiji 🇫🇯", "FI": "Finland 🇫🇮", "FR": "France 🇫🇷",
-    "GF": "French Guiana 🇬🇫", "PF": "French Polynesia 🇵🇫", "TF": "French Southern Territories 🇹🇫",
-    "GA": "Gabon 🇬🇦", "GM": "Gambia 🇬🇲", "GE": "Georgia 🇬🇪", "DE": "Germany 🇩🇪",
-    "GH": "Ghana 🇬🇭", "GI": "Gibraltar 🇬🇮", "GR": "Greece 🇬🇷", "GL": "Greenland 🇬🇱",
-    "GD": "Grenada 🇬🇩", "GP": "Guadeloupe 🇬🇵", "GU": "Guam 🇬🇺", "GT": "Guatemala 🇬🇹",
-    "GG": "Guernsey 🇬🇬", "GN": "Guinea 🇬🇳", "GW": "Guinea-Bissau 🇬🇼", "GY": "Guyana 🇬🇾",
-    "HT": "Haiti 🇭🇹", "HM": "Heard & McDonald Islands 🇭🇲", "VA": "Vatican City 🇻🇦",
-    "HN": "Honduras 🇭🇳", "HK": "Hong Kong 🇭🇰", "HU": "Hungary 🇭🇺", "IS": "Iceland 🇮🇸",
-    "IN": "India 🇮🇳", "ID": "Indonesia 🇮🇩", "IR": "Iran 🇮🇷", "IQ": "Iraq 🇮🇶",
-    "IE": "Ireland 🇮🇪", "IM": "Isle of Man 🇮🇲", "IL": "Israel 🇮🇱", "IT": "Italy 🇮🇹",
-    "JM": "Jamaica 🇯🇲", "JP": "Japan 🇯🇵", "JE": "Jersey 🇯🇪", "JO": "Jordan 🇯🇴",
-    "KZ": "Kazakhstan 🇰🇿", "KE": "Kenya 🇰🇪", "KI": "Kiribati 🇰🇮", "KP": "North Korea 🇰🇵",
-    "KR": "South Korea 🇰🇷", "KW": "Kuwait 🇰🇼", "KG": "Kyrgyzstan 🇰🇬", "LA": "Laos 🇱🇦",
-    "LV": "Latvia 🇱🇻", "LB": "Lebanon 🇱🇧", "LS": "Lesotho 🇱🇸", "LR": "Liberia 🇱🇷",
-    "LY": "Libya 🇱🇾", "LI": "Liechtenstein 🇱🇮", "LT": "Lithuania 🇱🇹", "LU": "Luxembourg 🇱🇺",
-    "MO": "Macau 🇲🇴", "MG": "Madagascar 🇲🇬", "MW": "Malawi 🇲🇼", "MY": "Malaysia 🇲🇾",
-    "MV": "Maldives 🇲🇻", "ML": "Mali 🇲🇱", "MT": "Malta 🇲🇹", "MH": "Marshall Islands 🇲🇭",
-    "MQ": "Martinique 🇲🇶", "MR": "Mauritania 🇲🇷", "MU": "Mauritius 🇲🇺", "YT": "Mayotte 🇾🇹",
-    "MX": "Mexico 🇲🇽", "FM": "Micronesia 🇫🇲", "MD": "Moldova 🇲🇩", "MC": "Monaco 🇲🇨",
-    "MN": "Mongolia 🇲🇳", "ME": "Montenegro 🇲🇪", "MS": "Montserrat 🇲🇸", "MA": "Morocco 🇲🇦",
-    "MZ": "Mozambique 🇲🇿", "MM": "Myanmar 🇲🇲", "NA": "Namibia 🇳🇦", "NR": "Nauru 🇳🇷",
-    "NP": "Nepal 🇳🇵", "NL": "Netherlands 🇳🇱", "NC": "New Caledonia 🇳🇨", "NZ": "New Zealand 🇳🇿",
-    "NI": "Nicaragua 🇳🇮", "NE": "Niger 🇳🇪", "NG": "Nigeria 🇳🇬", "NU": "Niue 🇳🇺",
-    "NF": "Norfolk Island 🇳🇫", "MK": "North Macedonia 🇲🇰", "MP": "Northern Mariana Islands 🇲🇵",
-    "NO": "Norway 🇳🇴", "OM": "Oman 🇴🇲", "PK": "Pakistan 🇵🇰", "PW": "Palau 🇵🇼",
-    "PS": "Palestine 🇵🇸", "PA": "Panama 🇵🇦", "PG": "Papua New Guinea 🇵🇬", "PY": "Paraguay 🇵🇾",
-    "PE": "Peru 🇵🇪", "PH": "Philippines 🇵🇭", "PN": "Pitcairn Islands 🇵🇳", "PL": "Poland 🇵🇱",
-    "PT": "Portugal 🇵🇹", "PR": "Puerto Rico 🇵🇷", "QA": "Qatar 🇶🇦", "RE": "Réunion 🇷🇪",
-    "RO": "Romania 🇷🇴", "RU": "Russia 🇷🇺", "RW": "Rwanda 🇷🇼", "BL": "St. Barthélemy 🇧🇱",
-    "SH": "St. Helena 🇸🇭", "KN": "St. Kitts & Nevis 🇰🇳", "LC": "St. Lucia 🇱🇨", "MF": "St. Martin 🇲🇫",
-    "PM": "St. Pierre & Miquelon 🇵🇲", "VC": "St. Vincent & Grenadines 🇻🇨", "WS": "Samoa 🇼🇸",
-    "SM": "San Marino 🇸🇲", "ST": "Sao Tome & Principe 🇸🇹", "SA": "Saudi Arabia 🇸🇦",
-    "SN": "Senegal 🇸🇳", "RS": "Serbia 🇷🇸", "SC": "Seychelles 🇸🇨", "SL": "Sierra Leone 🇸🇱",
-    "SG": "Singapore 🇸🇬", "SX": "Sint Maarten 🇸🇽", "SK": "Slovakia 🇸🇰", "SI": "Slovenia 🇸🇮",
-    "SB": "Solomon Islands 🇸🇧", "SO": "Somalia 🇸🇴", "ZA": "South Africa 🇿🇦", "GS": "South Georgia 🇬🇸",
-    "SS": "South Sudan 🇸🇸", "ES": "Spain 🇪🇸", "LK": "Sri Lanka 🇱🇰", "SD": "Sudan 🇸🇩",
-    "SR": "Suriname 🇸🇷", "SJ": "Svalbard & Jan Mayen 🇸🇯", "SE": "Sweden 🇸🇪", "CH": "Switzerland 🇨🇭",
-    "SY": "Syria 🇸🇾", "TW": "Taiwan 🇹🇼", "TJ": "Tajikistan 🇹🇯", "TZ": "Tanzania 🇹🇿",
-    "TH": "Thailand 🇹🇭", "TL": "Timor-Leste 🇹🇱", "TG": "Togo 🇹🇬", "TK": "Tokelau 🇹🇰",
-    "TO": "Tonga 🇹🇴", "TT": "Trinidad & Tobago 🇹🇹", "TN": "Tunisia 🇹🇳", "TR": "Türkiye 🇹🇷",
-    "TM": "Turkmenistan 🇹🇲", "TC": "Turks & Caicos Islands 🇹🇨", "TV": "Tuvalu 🇹🇻",
-    "UG": "Uganda 🇺🇬", "UA": "Ukraine 🇺🇦", "AE": "UAE 🇦🇪", "GB": "UK 🇬🇧",
-    "US": "USA 🇺🇸", "UM": "U.S. Outlying Islands 🇺🇲", "UY": "Uruguay 🇺🇾", "UZ": "Uzbekistan 🇺🇿",
-    "VU": "Vanuatu 🇻🇺", "VE": "Venezuela 🇻🇪", "VN": "Vietnam 🇻🇳", "VI": "U.S. Virgin Islands 🇻🇮",
-    "WF": "Wallis & Futuna 🇼🇫", "EH": "Western Sahara 🇪🇭", "YE": "Yemen 🇾🇪", "ZM": "Zambia 🇿🇲",
-    "ZW": "Zimbabwe 🇿🇼"
+    "AF": "Afghanistan", "AX": "Åland Islands", "AL": "Albania", "DZ": "Algeria",
+    "AS": "American Samoa", "AD": "Andorra", "AO": "Angola", "AI": "Anguilla",
+    "AQ": "Antarctica", "AG": "Antigua & Barbuda", "AR": "Argentina", "AM": "Armenia",
+    "AW": "Aruba", "AU": "Australia", "AT": "Austria", "AZ": "Azerbaijan",
+    "BS": "Bahamas", "BH": "Bahrain", "BD": "Bangladesh", "BB": "Barbados",
+    "BY": "Belarus", "BE": "Belgium", "BZ": "Belize", "BJ": "Benin",
+    "BM": "Bermuda", "BT": "Bhutan", "BO": "Bolivia", "BQ": "Caribbean Netherlands",
+    "BA": "Bosnia & Herzegovina", "BW": "Botswana", "BV": "Bouvet Island", "BR": "Brazil",
+    "IO": "British Indian Ocean Territory", "VG": "British Virgin Islands", "BN": "Brunei",
+    "BG": "Bulgaria", "BF": "Burkina Faso", "BI": "Burundi", "CV": "Cabo Verde",
+    "KH": "Cambodia", "CM": "Cameroon", "CA": "Canada", "KY": "Cayman Islands",
+    "CF": "Central African Republic", "TD": "Chad", "CL": "Chile", "CN": "China",
+    "CX": "Christmas Island", "CC": "Cocos (Keeling) Islands", "CO": "Colombia",
+    "KM": "Comoros", "CD": "Congo (DRC)", "CG": "Congo (Republic)", "CK": "Cook Islands",
+    "CR": "Costa Rica", "HR": "Croatia", "CU": "Cuba", "CW": "Curaçao",
+    "CY": "Cyprus", "CZ": "Czechia", "CI": "Côte d'Ivoire", "DK": "Denmark",
+    "DJ": "Djibouti", "DM": "Dominica", "DO": "Dominican Republic", "EC": "Ecuador",
+    "EG": "Egypt", "SV": "El Salvador", "GQ": "Equatorial Guinea", "ER": "Eritrea",
+    "EE": "Estonia", "SZ": "Eswatini", "ET": "Ethiopia", "FK": "Falkland Islands",
+    "FO": "Faroe Islands", "FJ": "Fiji", "FI": "Finland", "FR": "France",
+    "GF": "French Guiana", "PF": "French Polynesia", "TF": "French Southern Territories",
+    "GA": "Gabon", "GM": "Gambia", "GE": "Georgia", "DE": "Germany",
+    "GH": "Ghana", "GI": "Gibraltar", "GR": "Greece", "GL": "Greenland",
+    "GD": "Grenada", "GP": "Guadeloupe", "GU": "Guam", "GT": "Guatemala",
+    "GG": "Guernsey", "GN": "Guinea", "GW": "Guinea-Bissau", "GY": "Guyana",
+    "HT": "Haiti", "HM": "Heard & McDonald Islands", "VA": "Vatican City",
+    "HN": "Honduras", "HK": "Hong Kong", "HU": "Hungary", "IS": "Iceland",
+    "IN": "India", "ID": "Indonesia", "IR": "Iran", "IQ": "Iraq",
+    "IE": "Ireland", "IM": "Isle of Man", "IL": "Israel", "IT": "Italy",
+    "JM": "Jamaica", "JP": "Japan", "JE": "Jersey", "JO": "Jordan",
+    "KZ": "Kazakhstan", "KE": "Kenya", "KI": "Kiribati", "KP": "North Korea",
+    "KR": "South Korea", "KW": "Kuwait", "KG": "Kyrgyzstan", "LA": "Laos",
+    "LV": "Latvia", "LB": "Lebanon", "LS": "Lesotho", "LR": "Liberia",
+    "LY": "Libya", "LI": "Liechtenstein", "LT": "Lithuania", "LU": "Luxembourg",
+    "MO": "Macau", "MG": "Madagascar", "MW": "Malawi", "MY": "Malaysia",
+    "MV": "Maldives", "ML": "Mali", "MT": "Malta", "MH": "Marshall Islands",
+    "MQ": "Martinique", "MR": "Mauritania", "MU": "Mauritius", "YT": "Mayotte",
+    "MX": "Mexico", "FM": "Micronesia", "MD": "Moldova", "MC": "Monaco",
+    "MN": "Mongolia", "ME": "Montenegro", "MS": "Montserrat", "MA": "Morocco",
+    "MZ": "Mozambique", "MM": "Myanmar", "NA": "Namibia", "NR": "Nauru",
+    "NP": "Nepal", "NL": "Netherlands", "NC": "New Caledonia", "NZ": "New Zealand",
+    "NI": "Nicaragua", "NE": "Niger", "NG": "Nigeria", "NU": "Niue",
+    "NF": "Norfolk Island", "MK": "North Macedonia", "MP": "Northern Mariana Islands",
+    "NO": "Norway", "OM": "Oman", "PK": "Pakistan", "PW": "Palau",
+    "PS": "Palestine", "PA": "Panama", "PG": "Papua New Guinea", "PY": "Paraguay",
+    "PE": "Peru", "PH": "Philippines", "PN": "Pitcairn Islands", "PL": "Poland",
+    "PT": "Portugal", "PR": "Puerto Rico", "QA": "Qatar", "RE": "Réunion",
+    "RO": "Romania", "RU": "Russia", "RW": "Rwanda", "BL": "St. Barthélemy",
+    "SH": "St. Helena", "KN": "St. Kitts & Nevis", "LC": "St. Lucia", "MF": "St. Martin",
+    "PM": "St. Pierre & Miquelon", "VC": "St. Vincent & Grenadines", "WS": "Samoa",
+    "SM": "San Marino", "ST": "Sao Tome & Principe", "SA": "Saudi Arabia",
+    "SN": "Senegal", "RS": "Serbia", "SC": "Seychelles", "SL": "Sierra Leone",
+    "SG": "Singapore", "SX": "Sint Maarten", "SK": "Slovakia", "SI": "Slovenia",
+    "SB": "Solomon Islands", "SO": "Somalia", "ZA": "South Africa", "GS": "South Georgia",
+    "SS": "South Sudan", "ES": "Spain", "LK": "Sri Lanka", "SD": "Sudan",
+    "SR": "Suriname", "SJ": "Svalbard & Jan Mayen", "SE": "Sweden", "CH": "Switzerland",
+    "SY": "Syria", "TW": "Taiwan", "TJ": "Tajikistan", "TZ": "Tanzania",
+    "TH": "Thailand", "TL": "Timor-Leste", "TG": "Togo", "TK": "Tokelau",
+    "TO": "Tonga", "TT": "Trinidad & Tobago", "TN": "Tunisia", "TR": "Türkiye",
+    "TM": "Turkmenistan", "TC": "Turks & Caicos Islands", "TV": "Tuvalu",
+    "UG": "Uganda", "UA": "Ukraine", "AE": "UAE", "GB": "UK",
+    "US": "USA", "UM": "U.S. Outlying Islands", "UY": "Uruguay", "UZ": "Uzbekistan",
+    "VU": "Vanuatu", "VE": "Venezuela", "VN": "Vietnam", "VI": "U.S. Virgin Islands",
+    "WF": "Wallis & Futuna", "EH": "Western Sahara", "YE": "Yemen", "ZM": "Zambia",
+    "ZW": "Zimbabwe"
 }
 
 # --- MASTER PREFIX MAPPER (250+ PHONE CODES FOR SEARCH) ---
@@ -1205,7 +1206,8 @@ ISO_TO_PREFIX = {
 }
 
 def get_country_name(code):
-    return ISO_COUNTRY_MAP.get(code.upper(), f"{code.upper()} 🏳️")
+    # No flag emoji: flags have no Premium IDs in the bundled packs.
+    return ISO_COUNTRY_MAP.get(code.upper(), f"{code.upper()}")
 
 async def fetch_server2_countries():
     """Fetches and sorts countries from the active API (TGPVA or TG-Lion)"""
@@ -1282,7 +1284,7 @@ async def callback_buy_main(cq: CallbackQuery):
     await cq.answer()
     user = get_or_create_user(cq.from_user.id, cq.from_user.username)
     balance_inr = user.get('balance', 0.0)
-    balance_usdt = balance_inr / 95.0
+    balance_usdt = balance_inr / USD_TO_INR
     
     settings = settings_col.find_one({"_id": "server_config"}) or {}
     s1 = settings.get("s1", "active")
@@ -1445,7 +1447,7 @@ async def callback_buy_server2(cq: CallbackQuery):
     # 1. 10x2 Country Grid
     disc = get_user_discount(cq.from_user.id)
     for c in page_items:
-        inr_price = apply_user_discount(c['price'] * 95.0, cq.from_user.id)
+        inr_price = apply_user_discount(c['price'] * USD_TO_INR, cq.from_user.id)
         btn_text = f"{c['name']} (₹{inr_price:.2f})"
         kb.button(text=btn_text, callback_data=f"srv2_info:{c['code']}:{c['price']:.4f}")
     kb.adjust(2)
@@ -1526,7 +1528,7 @@ async def srv2_do_search(msg: Message, state: FSMContext):
         
     kb = InlineKeyboardBuilder()
     for c in results[:20]:
-        inr_price = apply_user_discount(c['price'] * 95.0, msg.from_user.id)
+        inr_price = apply_user_discount(c['price'] * USD_TO_INR, msg.from_user.id)
         kb.button(text=f"{c['name']} (₹{inr_price:.2f})", callback_data=f"srv2_info:{c['code']}:{c['price']:.4f}")
     kb.adjust(2)
     
@@ -1547,7 +1549,7 @@ async def srv2_country_info(cq: CallbackQuery):
     parts = cq.data.split(":")
     code = parts[1]
     usd_price = float(parts[2])
-    inr_price = apply_user_discount(usd_price * 95.0, cq.from_user.id)
+    inr_price = apply_user_discount(usd_price * USD_TO_INR, cq.from_user.id)
     disc = get_user_discount(cq.from_user.id)
     
     await cq.message.edit_text("🔄 <i>Loading country details...</i>", parse_mode="HTML")
@@ -1584,7 +1586,7 @@ async def srv2_country_info(cq: CallbackQuery):
 async def srv2_show_terms(cq: CallbackQuery):
     _, code, usd_price = cq.data.split(":")
     usd_price = float(usd_price)
-    inr_price = apply_user_discount(usd_price * 95.0, cq.from_user.id)
+    inr_price = apply_user_discount(usd_price * USD_TO_INR, cq.from_user.id)
     
     settings = settings_col.find_one({"_id": "server_config"}) or {}
     active_api = settings.get("s2_api", "tgpva")
@@ -1639,7 +1641,7 @@ async def srv2_buy_number(cq: CallbackQuery):
     usd_price = float(cq.data.split(":")[2])
     user_id = cq.from_user.id
     user = get_or_create_user(user_id, cq.from_user.username)
-    inr_price = apply_user_discount(usd_price * 95.0, user)
+    inr_price = apply_user_discount(usd_price * USD_TO_INR, user)
     
     if user.get("balance", 0.0) < inr_price:
         return await cq.answer("❌ Insufficient Balance! Please recharge.", show_alert=True)
@@ -2449,7 +2451,7 @@ async def cmd_remove_country(msg: Message):
     await msg.answer("🌍 Select a country to remove:", reply_markup=kb.as_markup())
 
 @dp.callback_query(F.data.startswith("removecountry:"))
-async def callback_remove_country(cq: CallbackQuery):
+async def callback_remove_entire_country(cq: CallbackQuery):
     await cq.answer()
     _, country_name = cq.data.split(":", 1)
 
@@ -2509,9 +2511,9 @@ async def cmd_set_prices(msg: Message, state: FSMContext):
     
     await msg.answer(
         "📋 <b>Send the price list in this format:</b>\n\n"
-        "<code>+1 USA 🇺🇸 - ₹10</code>\n"
-        "<code>+91 India 🇮🇳 - ₹29</code>\n"
-        "<code>+232 Sierra Leone 🇸🇱 - ₹13</code>\n\n"
+        "<code>+1 USA - ₹10</code>\n"
+        "<code>+91 India - ₹29</code>\n"
+        "<code>+232 Sierra Leone - ₹13</code>\n\n"
         "⚠️ <i>Sending a new list will overwrite the old one.</i>",
         parse_mode="HTML"
     )
@@ -2539,8 +2541,8 @@ async def handle_set_prices(msg: Message, state: FSMContext):
         return await msg.answer(
             "❌ <b>Invalid format detected.</b>\n\n"
             "Make sure you use the format:\n"
-            "<code>+Code CountryName Flag - ₹Price</code>\n"
-            "Example:\n<code>+232 Sierra Leone 🇸🇱 - 13</code>", 
+            "<code>+Code CountryName - ₹Price</code>\n"
+            "Example:\n<code>+232 Sierra Leone - 13</code>", 
             parse_mode="HTML"
         )
 
@@ -3691,15 +3693,21 @@ async def callback_stats(cq: CallbackQuery):
     if not user:
         user = get_or_create_user(cq.from_user.id, cq.from_user.username)
     disc = get_user_discount(user)
-    disc_line = f"<br>🏷️ <b>VIP Discount:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
+    disc_line = f"<br><br>🏷️ <b>VIP Discount:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
+    currency_code = str(user.get("currency", "INR") or "INR").upper()
+    currency_label = "USD ($)" if currency_code == "USD" else "INR (₹)"
+    # Owner-requested Account layout: every field on its own line with a
+    # blank line between fields — never crammed onto one running line.
     steps_text = (
-        f"<h2>👤 Account Profile — TGA Store | API</h2>"
-        f"<blockquote>👤 <b>Name:</b> {html.escape(cq.from_user.full_name)}<br>"
-        f"💻 <b>Username:</b> @{cq.from_user.username if cq.from_user.username else 'N/A'}<br>"
-        f"🆔 <b>User ID:</b> <code>{cq.from_user.id}</code><br>"
-        f"💰 <b>Wallet Balance:</b> <code>{format_balance(user)}</code>{disc_line}</blockquote>"
-        f"<blockquote>{tg_icon()} <b>Official Bot:</b> @{BOTUSER}<br>"
-        f"📈 <b>Sales Channel:</b> @{SALESLOG}</blockquote>"
+        f"<h2>{tg_icon()} TGA Store | API</h2>"
+        "<h3>👤 Account</h3>"
+        f"<blockquote>👤 <b>Name:</b> {html.escape(cq.from_user.full_name)}<br><br>"
+        f"💻 <b>Username:</b> @{cq.from_user.username if cq.from_user.username else 'N/A'}<br><br>"
+        f"🆔 <b>User ID:</b> <code>{cq.from_user.id}</code><br><br>"
+        f"💰 <b>Your Balance:</b> <code>{format_balance(user)}</code><br><br>"
+        f"💱 <b>Currency:</b> {currency_label}{disc_line}</blockquote>"
+        f"<blockquote>{tg_icon()} <b>Bot:</b> @{BOTUSER}<br><br>"
+        f"📈 <b>Sales Log:</b> @{SALESLOG}</blockquote>"
     )
 
     kb = InlineKeyboardBuilder()
@@ -3761,7 +3769,7 @@ async def callback_refer(cq: CallbackQuery):
         "<h2>🎁 Refer &amp; Earn Program</h2>"
         "<blockquote>💰 <b>Dual Referral Rewards</b><br>"
         f"• 🎁 <b>Instant Join Bonus:</b> <code>₹{refer_bonus:.2f}</code> per verified referral<br>"
-        f"• 💎 <b>Deposit Commission:</b> <code>{refer_comm:g}%</code> on every friend's deposit!<br>"
+        f"• 💎 <b>Referral Commission:</b> <code>{refer_comm:g}%</code> of every deposit made by friends you referred — paid to you, not to the depositor!<br>"
         "Rewards are credited directly to your wallet automatically.</blockquote>"
         "<blockquote>📊 <b>Your Referral Statistics</b><br>"
         f"👥 <b>Total Referred:</b> <code>{total_referred}</code><br>"
@@ -3847,27 +3855,23 @@ async def cmd_advanced_sales(msg: Message):
 
     # ---------------- 📋 BUILD THE REPORT ----------------
     report = (
-        "📊 <b>ADVANCED SYSTEM ANALYTICS</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "👥 <b>USER METRICS</b>\n"
-        f"• <b>Total Users:</b> {total_users}\n"
-        f"• <b>Joined Today:</b> {users_today}\n"
-        f"• <b>Joined This Week:</b> {users_week}\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "💰 <b>FINANCIAL METRICS (INR)</b>\n"
-        f"• <b>Total Deposits:</b> ₹{total_recharge:,.2f}\n"
-        f"• <b>Deposits Today:</b> ₹{today_recharge:,.2f}\n"
-        f"• <b>Total Withdrawals:</b> ₹{total_wd:,.2f}\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "🛒 <b>OTP SALES METRICS</b>\n"
-        f"• <b>Total Numbers Sold:</b> {total_sold}\n"
-        f"• <b>Gross Revenue:</b> ₹{total_sales_inr:,.2f}\n\n"
-        f"📅 <b>Today's Sales:</b> {today_sold} (₹{today_sales_inr:,.2f})\n"
-        f"📅 <b>Weekly Sales:</b> {week_sold} (₹{week_sales_inr:,.2f})\n\n"
-        f"🌍 <b>Top Country:</b> {top_country}\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🤖 <b>Bot Status:</b> 🟢 Active\n"
-        f"👨‍💻 <b>Support:</b> @{SUPPORT}"
+        "<h2>📊 Advanced System Analytics</h2>"
+        "<blockquote>👥 <b>User Metrics</b><br>"
+        f"• <b>Total Users:</b> <code>{total_users:,}</code><br>"
+        f"• <b>Joined Today:</b> <code>{users_today:,}</code><br>"
+        f"• <b>Joined This Week:</b> <code>{users_week:,}</code></blockquote>"
+        "<blockquote>💰 <b>Financial Metrics (INR)</b><br>"
+        f"• <b>Total Deposits:</b> <code>₹{total_recharge:,.2f}</code><br>"
+        f"• <b>Deposits Today:</b> <code>₹{today_recharge:,.2f}</code><br>"
+        f"• <b>Total Withdrawals:</b> <code>₹{total_wd:,.2f}</code></blockquote>"
+        "<blockquote>🛒 <b>OTP Sales Metrics</b><br>"
+        f"• <b>Total Numbers Sold:</b> <code>{total_sold:,}</code><br>"
+        f"• <b>Gross Revenue:</b> <code>₹{total_sales_inr:,.2f}</code><br>"
+        f"• <b>Today's Sales:</b> <code>{today_sold:,}</code> (<code>₹{today_sales_inr:,.2f}</code>)<br>"
+        f"• <b>Weekly Sales:</b> <code>{week_sold:,}</code> (<code>₹{week_sales_inr:,.2f}</code>)<br>"
+        f"• 🌍 <b>Top Country:</b> <code>{top_country}</code></blockquote>"
+        "<blockquote>🤖 <b>Bot Status:</b> <code>🟢 Active</code><br>"
+        f"👨‍💻 <b>Support:</b> @{SUPPORT}</blockquote>"
     )
 
     await status_msg.edit_text(report, parse_mode="HTML")
@@ -4397,9 +4401,7 @@ async def show_purchase_logs(cq: CallbackQuery):
     await cq.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
 # ================= API KEYS (Admin Server 2) =================
-TGLION_API_KEY = "C80mflegScDkM51bzH"
-TGLION_ID = "7888066934"
-TGPVA_API_KEY = "862Ddu3tLbHGpyYGK5BZhmavl3ljxRsF"
+# Same environment-only keys imported from config.py at the top of this file.
 
 # ================= Admin Server Management =================
 async def get_api_balances():
@@ -4701,22 +4703,22 @@ async def cmd_userinfo(msg: Message):
     joined_str = joined_at.strftime("%d %b %Y, %H:%M") if joined_at else "N/A"
 
     text = (
-        f"<b>👤 Full User Profile</b>\n\n"
+        f"<h2>👤 Full User Profile</h2>"
         f"<blockquote>"
-        f"🆔 <b>User ID:</b> <code>{target_id}</code>\n"
-        f"📛 <b>Username:</b> @{user.get('username') or 'NoUsername'}\n"
+        f"🆔 <b>User ID:</b> <code>{target_id}</code><br>"
+        f"📛 <b>Username:</b> @{user.get('username') or 'NoUsername'}<br>"
         f"📅 <b>Joined:</b> {joined_str}"
-        f"</blockquote>\n\n"
+        f"</blockquote>"
         f"<blockquote>"
-        f"💳 <b>Current Balance:</b> ₹{user.get('balance', 0.0):.2f}\n"
-        f"💰 <b>Total Deposited:</b> ₹{total_deposited:.2f}\n"
-        f"🛒 <b>Total Spent:</b> ₹{total_spent:.2f}\n"
-        f"📦 <b>Total Orders:</b> {total_orders}"
-        f"</blockquote>\n\n"
+        f"💳 <b>Current Balance:</b> <code>₹{user.get('balance', 0.0):.2f}</code><br>"
+        f"💰 <b>Total Deposited:</b> <code>₹{total_deposited:.2f}</code><br>"
+        f"🛒 <b>Total Spent:</b> <code>₹{total_spent:.2f}</code><br>"
+        f"📦 <b>Total Orders:</b> <code>{total_orders}</code>"
+        f"</blockquote>"
         f"<blockquote>"
-        f"🔗 <b>Referred By:</b> {f'<code>{referred_by}</code>' if referred_by else 'None'}\n"
-        f"👥 <b>Total Referred Users:</b> {total_referred}\n"
-        f"💵 <b>Referral Earnings:</b> ₹{referral_earnings:.2f}"
+        f"🔗 <b>Referred By:</b> {f'<code>{referred_by}</code>' if referred_by else 'None'}<br>"
+        f"👥 <b>Total Referred Users:</b> <code>{total_referred}</code><br>"
+        f"💵 <b>Referral Earnings:</b> <code>₹{referral_earnings:.2f}</code>"
         f"</blockquote>"
     )
     await msg.answer(text, parse_mode="HTML")        
@@ -5080,7 +5082,7 @@ async def render_admin_panel(message: Message, edit: bool = False):
         f"• {wa_icon()} <b>WhatsApp OTPs:</b> <code>{'ONLINE' if features.get('whatsapp_enabled', True) else 'DISABLED'}</code><br>"
         f"• 🏪 <b>Digital Store:</b> <code>{'ONLINE' if features.get('store_enabled', True) else 'DISABLED'}</code><br>"
         f"• 📢 <b>Force-Join Gate:</b> <code>{fsub_state}</code><br>"
-        f"• 🎁 <b>Referral Rewards:</b> <code>₹{refer_bonus:.2f}/join + {refer_comm:g}% deposit</code></blockquote>"
+        f"• 🎁 <b>Referral Rewards:</b> <code>₹{refer_bonus:.2f}/join + {refer_comm:g}% referral commission</code></blockquote>"
         "<p>👇 <i>Use the interactive controls below to manage every module or toggle user-menu services in real time:</i></p>"
     )
     if edit:
@@ -5241,7 +5243,7 @@ async def admin_open_section(cq: CallbackQuery, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="➕ Create Custom Code", callback_data="adm_red:create"),
-                InlineKeyboardButton(text="🎲 Quick Random Code", callback_data="adm_red:random"),
+                InlineKeyboardButton(text="🎟️ Quick Random Code", callback_data="adm_red:random"),
             ],
             [
                 InlineKeyboardButton(text="📋 View Active Codes", callback_data="adm_red:list"),
@@ -5594,7 +5596,7 @@ async def render_admin_refer_menu(message: Message, edit: bool = False):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text=f"✏️ Edit Join Bonus (₹{refer_bonus:.2f})", callback_data="adm_ref:bonus"),
-            InlineKeyboardButton(text=f"✏️ Edit Deposit Comm ({refer_comm:g}%)", callback_data="adm_ref:comm"),
+            InlineKeyboardButton(text=f"✏️ Edit Referral Comm ({refer_comm:g}%)", callback_data="adm_ref:comm"),
         ],
         [
             InlineKeyboardButton(text="🎁 ₹0.10/ref", callback_data="adm_ref:set_bonus:0.1"),
@@ -5609,11 +5611,11 @@ async def render_admin_refer_menu(message: Message, edit: bool = False):
         [InlineKeyboardButton(text="⬅️ Admin Panel", callback_data="admin_refresh")],
     ])
     text = (
-        "<h2>🎁 Referral &amp; Deposit Commission Control</h2>"
+        "<h2>🎁 Refer &amp; Earn — Referral Commission Control</h2>"
         f"<blockquote>🎁 <b>Instant Join Bonus:</b> <code>₹{refer_bonus:.2f}</code> per verified referral<br>"
-        f"💎 <b>Deposit Commission:</b> <code>{refer_comm:g}%</code> on every referral deposit<br>"
+        f"💎 <b>Referral Commission:</b> <code>{refer_comm:g}%</code> of every deposit made by a referred user — paid only to the referrer<br>"
         f"👥 <b>Total Referred Users:</b> <code>{total_referrals:,}</code></blockquote>"
-        "<p>👇 <i>Tap a button below to customize the join bonus or deposit commission percentage (or use <code>/setreferbonus</code> and <code>/setrefercomm</code>):</i></p>"
+        "<p>👇 <i>Tap a button below to customize the join bonus or Referral Commission percentage (or use <code>/setreferbonus</code> and <code>/setrefercomm</code>):</i></p>"
     )
     if edit:
         await message.edit_text(text, reply_markup=kb)
@@ -5640,8 +5642,8 @@ async def admin_refer_action(cq: CallbackQuery, state: FSMContext):
     elif action == "comm":
         await state.set_state(AdminInteractive.waiting_refer_comm)
         await cq.message.edit_text(
-            "<h2>💎 Set Referral Deposit Commission (%)</h2>"
-            "<blockquote>Send the new <b>Referral Deposit Commission percentage</b> (e.g. <code>2</code> for 2%, <code>5</code> for 5%, or <code>0</code> to disable):</blockquote>",
+            "<h2>💎 Set Referral Commission (%)</h2>"
+            "<blockquote>Send the new <b>Referral Commission percentage</b> — the referrer earns this % of every deposit made by users they referred (e.g. <code>2</code> for 2%, <code>5</code> for 5%, or <code>0</code> to disable):</blockquote>",
             reply_markup=back_kb,
         )
     elif action == "set_bonus" and len(parts) > 2:
@@ -5653,7 +5655,7 @@ async def admin_refer_action(cq: CallbackQuery, state: FSMContext):
     elif action == "set_comm" and len(parts) > 2:
         val = max(0.0, min(100.0, float(parts[2])))
         settings_col.update_one({"_id": "bot_features"}, {"$set": {"refer_commission_percent": val}}, upsert=True)
-        await cq.answer(f"✅ Deposit Commission set to {val:g}%!", show_alert=True)
+        await cq.answer(f"✅ Referral Commission set to {val:g}%!", show_alert=True)
         await render_admin_refer_menu(cq.message, edit=True)
         return
     await cq.answer()
@@ -5700,19 +5702,19 @@ async def cmd_setreferbonus(msg: Message):
     await msg.answer(f"<h2>✅ Referral Join Bonus Updated</h2><blockquote>New Join Bonus: <code>₹{val:.2f}</code> per referral.</blockquote>")
 
 
-@dp.message(Command("setrefercomm"))
+@dp.message(Command("setrefercomm", "setreferralcommission"))
 async def cmd_setrefercomm(msg: Message):
     if not is_admin(msg.from_user.id):
         return await msg.answer("⛔ Access denied.")
     parts = (msg.text or "").split()
     if len(parts) < 2:
-        return await msg.answer("<h2>💎 Set Deposit Commission</h2><blockquote><b>Usage:</b> <code>/setrefercomm 2</code></blockquote>")
+        return await msg.answer("<h2>💎 Set Referral Commission</h2><blockquote><b>Usage:</b> <code>/setrefercomm 2</code><br>The referrer earns this % of every deposit made by users they referred.</blockquote>")
     try:
         val = max(0.0, min(100.0, float(parts[1].replace("%", ""))))
     except ValueError:
         return await msg.answer("<h2>❌ Invalid Percentage</h2>")
     settings_col.update_one({"_id": "bot_features"}, {"$set": {"refer_commission_percent": val}}, upsert=True)
-    await msg.answer(f"<h2>✅ Referral Deposit Commission Updated</h2><blockquote>New Deposit Commission: <code>{val:g}%</code>.</blockquote>")
+    await msg.answer(f"<h2>✅ Referral Commission Updated</h2><blockquote>New Referral Commission: <code>{val:g}%</code> of every referred user's deposit, paid to the referrer.</blockquote>")
 
 
 # ================= Interactive Admin: Manage Admins =================
@@ -6160,7 +6162,7 @@ async def admin_redeem_action(cq: CallbackQuery, state: FSMContext):
         await state.update_data(custom_code=code)
         await state.set_state(RedeemState.waiting_amount_custom)
         await cq.message.edit_text(
-            "<h2>🎲 Random Redeem Code Generated</h2>"
+            "<h2>🎟️ Random Redeem Code Generated</h2>"
             f"<blockquote>🎟️ <b>Generated Code:</b> <code>{code}</code><br>"
             "💰 Now send the <b>INR amount (₹)</b> per claim for this code:</blockquote>",
             reply_markup=back_kb,

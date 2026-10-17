@@ -29,6 +29,16 @@ API_ID = int(_getenv("API_ID", "0") or 0)
 API_HASH = _getenv("API_HASH")
 TEMPORASMS_API_KEY = _getenv("TEMPORASMS_API_KEY")
 
+# Server 2 providers. These used to be hard-coded API keys in bot.py;
+# credentials must only ever come from the environment (see example.env).
+TGLION_API_KEY = _getenv("TGLION_API_KEY")
+TGLION_ID = _getenv("TGLION_ID")
+TGPVA_API_KEY = _getenv("TGPVA_API_KEY")
+
+# One global money rate for the whole bot: $1 = ₹100 (fixed by the owner;
+# every module uses this same 100 rate for prices, balances and deposits).
+USD_TO_INR = 100.0
+
 BOT_USERNAME = _getenv("BOT_USERNAME", "TGAStoreAPIBot").lstrip("@")
 SUPPORT_USERNAME = _getenv("SUPPORT_USERNAME", "OfcCuteSmile").lstrip("@")
 UPDATES_CHANNEL = _getenv("UPDATES_CHANNEL", "TGAForu").lstrip("@")

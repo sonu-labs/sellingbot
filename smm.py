@@ -490,7 +490,8 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                 f"🎯 <b>Service:</b> {h(order.get('service_name'))}",
                 f"🚀 <b>Platform:</b> {h(order.get('platform_emoji') or '📱')} {h(order.get('platform_name'))}",
                 f"🔢 <b>Quantity:</b> <code>{h(qty_fmt(order.get('quantity')))}</code>",
-                f"🏁 <b>Start:</b> <code>{h(order.get('start_count'))}</code>    ⏳ <b>Remains:</b> <code>{h(order.get('remains'))}</code>",
+                f"🏁 <b>Start:</b> <code>{h(order.get('start_count'))}</code>",
+                f"⏳ <b>Remains:</b> <code>{h(order.get('remains'))}</code>",
                 f"🆔 <b>Order ID:</b> <code>{h(order['_id'])}</code>",
                 refund_line,
             )
@@ -582,7 +583,8 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                 f"📊 <b>Status:</b> {h(pretty)}",
                 f"🔢 <b>Quantity:</b> <code>{h(qty_fmt(order.get('quantity')))}</code>",
                 f"💰 <b>Charged:</b> <code>{h(inr(order.get('price')))}</code>",
-                f"🏁 <b>Start:</b> <code>{h(order.get('start_count'))}</code>    ⏳ <b>Remains:</b> <code>{h(order.get('remains'))}</code>",
+                f"🏁 <b>Start:</b> <code>{h(order.get('start_count'))}</code>",
+                f"⏳ <b>Remains:</b> <code>{h(order.get('remains'))}</code>",
                 f"💸 <b>Refunded:</b> {refunded}",
             )
             + card(
@@ -834,7 +836,8 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         sample = rate_1k / 1000 * int(svc["min"])
         lines = [
             f"💰 <b>Rate:</b> <code>{h(inr(rate_1k))}</code> <i>per 1,000</i>",
-            f"📉 <b>Min:</b> <code>{h(qty_fmt(svc['min']))}</code>    📈 <b>Max:</b> <code>{h(qty_fmt(svc['max']))}</code>",
+            f"📉 <b>Min:</b> <code>{h(qty_fmt(svc['min']))}</code>",
+            f"📈 <b>Max:</b> <code>{h(qty_fmt(svc['max']))}</code>",
             f"💳 <b>Balance:</b> <code>{h(inr(balance))}</code>",
             f"💡 <i>{h(qty_fmt(svc['min']))} = {h(inr(sample))}</i>",
         ]
@@ -883,7 +886,8 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             warn = (
                 "<h2>❌ Quantity Out of Range</h2>"
                 + card(
-                    f"📉 <b>Min:</b> <code>{h(qty_fmt(svc['min']))}</code>    📈 <b>Max:</b> <code>{h(qty_fmt(svc['max']))}</code>",
+                    f"📉 <b>Min:</b> <code>{h(qty_fmt(svc['min']))}</code>",
+            f"📈 <b>Max:</b> <code>{h(qty_fmt(svc['max']))}</code>",
                     f"🔢 <b>You sent:</b> <code>{h(qty_fmt(qty))}</code>",
                 )
                 + "<p><i>Send a number inside that range.</i></p>"
@@ -1778,7 +1782,8 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                 f"🏢 <b>Panel:</b> {h(panel['name'] if panel else 'Unknown')}",
                 f"🆔 <b>Provider ID:</b> <code>{h(svc.get('provider_service_id'))}</code>",
                 f"💰 <b>Price:</b> <code>{h(inr(svc.get('price_per_1000')))}</code> <i>/ 1,000</i>",
-                f"📉 <b>Min:</b> <code>{h(qty_fmt(svc.get('min')))}</code>    📈 <b>Max:</b> <code>{h(qty_fmt(svc.get('max')))}</code>",
+                f"📉 <b>Min:</b> <code>{h(qty_fmt(svc.get('min')))}</code>",
+                f"📈 <b>Max:</b> <code>{h(qty_fmt(svc.get('max')))}</code>",
             )
         )
         await edit_html(cq.message, text, kb.as_markup())

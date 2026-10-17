@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 LANGUAGES = {
-    "en": ("🇬🇧", "English"),
-    "ru": ("🇷🇺", "Русский"),
-    "ar": ("🇸🇦", "العربية (Saudi Arabia)"),
-    "zh": ("🇨🇳", "中文"),
-    "id": ("🇮🇩", "Bahasa Indonesia"),
+    # Flag emojis have no Premium custom-emoji IDs in the bundled packs, so
+    # language buttons use the Premium globe icon instead of a normal flag.
+    "en": ("🌐", "English"),
+    "ru": ("🌐", "Русский"),
+    "ar": ("🌐", "العربية (Saudi Arabia)"),
+    "zh": ("🌐", "中文"),
+    "id": ("🌐", "Bahasa Indonesia"),
 }
 CURRENCIES = {"INR": ("₹", "Indian Rupee"), "USD": ("$", "US Dollar")}
-USD_RATE = 95.0  # Existing bot accounting rate: balance is stored in INR.
+USD_RATE = 100.0  # $1 = ₹100 everywhere. Balance is stored in INR.
 
 TG_EMOJI = '<tg-emoji emoji-id="5866355487255039002">✈️</tg-emoji>'
 WA_EMOJI = '<tg-emoji emoji-id="5935973359480213803">💬</tg-emoji>'

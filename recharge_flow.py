@@ -42,7 +42,8 @@ from rich_messages import UPI_EMOJI_ID, upi_icon
 
 
 # CONFIG
-USDT_TO_INR = 90
+# $1 = ₹100 everywhere in the bot (prices, balances, crypto deposits).
+USDT_TO_INR = 100
 MIN_USDT = 0.1
 MIN_INR_DEPOSIT = 10
 UPI_INVOICE_EXPIRY_MIN = 60
@@ -124,7 +125,14 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         user = users_col.find_one({"_id": user_id})
         return user.get("balance", 0) if user else 0
 
-    async def _credit_user_and_referral(user_id: int, amount_inr: float, method_label: str = "Deposit") -> float:
+    async def _credit_deposit_and_referral_commission(user_id: int, amount_inr: float, method_label: str = "Deposit") -> float:
+        """Credit a deposit, then pay Referral Commission to the referrer only.
+
+        There is no "deposit commission" for the depositor.  If ``user_id``
+        was referred by someone, that referrer earns the admin-set
+        ``refer_commission_percent`` % of this deposit; the depositor only
+        receives their own deposited amount.
+        """
         users_col.update_one(
             {"_id": user_id}, {"$inc": {"balance": amount_inr}}, upsert=True
         )
@@ -146,11 +154,11 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
                         ref_bal = float(ref_doc.get("balance", 0.0))
                         await bot.send_message(
                             referrer_id,
-                            f"<h2>🎁 Referral Deposit Commission!</h2>"
+                            f"<h2>🎁 Referral Commission Earned!</h2>"
                             f"<blockquote>"
-                            f"💰 <b>Commission Earned:</b> <code>+₹{comm_inr:.2f}</code> ({comm_pct:g}%)\n"
-                            f"👤 <b>Referred User ID:</b> <code>{user_id}</code>\n"
-                            f"💳 <b>Deposit Amount:</b> <code>₹{float(amount_inr):.2f}</code> ({escape(method_label)})\n"
+                            f"💰 <b>Referral Commission:</b> <code>+₹{comm_inr:.2f}</code> ({comm_pct:g}%)<br>"
+                            f"👤 <b>Your Referral's User ID:</b> <code>{user_id}</code><br>"
+                            f"💳 <b>Your Referral's Deposit:</b> <code>₹{float(amount_inr):.2f}</code> ({escape(method_label)})<br>"
                             f"🏦 <b>Your New Balance:</b> <code>₹{ref_bal:.2f}</code>"
                             f"</blockquote>",
                             parse_mode="HTML",
@@ -297,7 +305,9 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             else "🔗 <b>Username:</b> <i>None</i>"
         )
         lines.append(f"🆔 <b>User ID:</b> <code>{user_id}</code>")
-        return "\n".join(lines)
+        # <br> (not a bare newline) so Name / Username / User ID always render
+        # on separate lines in both Rich and classic messages/captions.
+        return "<br>".join(lines)
 
     # ==============================
     # TERMS & CONDITIONS MENU
@@ -1204,7 +1214,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             "created_at": now,
             "settled_at": now,
         })
-        new_balance = await _credit_user_and_referral(
+        new_balance = await _credit_deposit_and_referral_commission(
             message.from_user.id, amount_inr, "Binance Pay"
         )
 
@@ -1349,7 +1359,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
                 return
             usdt = inv["amount_usdt"]
             inr = inv["amount_inr"]
-            new_balance = await _credit_user_and_referral(
+            new_balance = await _credit_deposit_and_referral_commission(
                 inv["user_id"], inr, "OxaPay Crypto"
             )
             await _delete_message(cq.message)
@@ -1604,7 +1614,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             return
 
         network = escape(str(data.get("usdt_network") or "USDT"))
-        new_balance = await _credit_user_and_referral(
+        new_balance = await _credit_deposit_and_referral_commission(
             message.from_user.id, amount_inr, f"USDT ({network})"
         )
         await wait_msg.edit_text(
@@ -1838,7 +1848,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
                 return
 
             amount_inr = float(tx.get("amount_inr") or tx.get("amount") or 0)
-            new_balance = await _credit_user_and_referral(
+            new_balance = await _credit_deposit_and_referral_commission(
                 tx["user_id"], amount_inr, "Cwallet Manual"
             )
             try:
@@ -1939,7 +1949,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
                 await cq.answer("This request was already processed.", show_alert=True)
                 return
 
-            new_balance = await _credit_user_and_referral(
+            new_balance = await _credit_deposit_and_referral_commission(
                 tx["user_id"], amount, "Manual UPI"
             )
             try:
@@ -2142,7 +2152,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
 
         if extra_set:
             tx.update(extra_set)
-        new_balance = await _credit_user_and_referral(
+        new_balance = await _credit_deposit_and_referral_commission(
             tx["user_id"], float(tx["amount"]), method_label
         )
         from_user = event.from_user
@@ -2660,7 +2670,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
     # BACKGROUND AUTO-SWEEPER
     # ==============================
     async def _auto_notify(tx: dict, amount: float, method_label: str):
-        new_balance = await _credit_user_and_referral(
+        new_balance = await _credit_deposit_and_referral_commission(
             tx["user_id"], float(amount), method_label
         )
         await bot.send_message(

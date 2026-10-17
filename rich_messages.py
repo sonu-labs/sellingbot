@@ -17,8 +17,8 @@ from typing import Any
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import (
-    EditMessageCaption, EditMessageText, SendAnimation, SendAudio, SendDocument,
-    SendMessage, SendPhoto, SendVideo, SendVoice,
+    AnswerCallbackQuery, EditMessageCaption, EditMessageText, SendAnimation,
+    SendAudio, SendDocument, SendMessage, SendPhoto, SendVideo, SendVoice,
 )
 from aiogram.types import (
     InlineKeyboardButton, InlineKeyboardMarkup, InputMediaAnimation,
@@ -53,6 +53,11 @@ TELEGRAM_EMOJI_ID = "5866355487255039002"
 WHATSAPP_EMOJI_ID = "5935973359480213803"
 API_DOCS_EMOJI_ID = "4994749624662098557"
 UPI_EMOJI_ID = "6152069549442208798"
+
+# One global money rate for the whole bot: $1 = ₹100.
+# Every USD/USDT -> INR conversion (prices, balances, display currency)
+# must use 100, never an older 90/95 rate.
+USD_TO_INR = 100.0
 
 
 def tg_icon(alt: str = "✈️") -> str:
@@ -226,11 +231,75 @@ def convert_currency(text: str, currency: str | None) -> str:
     def replace(match: re.Match) -> str:
         try:
             inr = float(match.group(1).replace(",", ""))
-            return f"${inr / 95.0:,.2f}"
+            return f"${inr / USD_TO_INR:,.2f}"
         except ValueError:
             return match.group(0)
 
     return _INR_AMOUNT.sub(replace, text)
+
+
+# ---------------------------------------------------------------------------
+# No-normal-emoji guarantee
+# ---------------------------------------------------------------------------
+# The bundled packs do not contain a Premium custom emoji for every Unicode
+# emoji (most country flags, 🎲, …).  A normal emoji must never be shown next
+# to Premium ones, so any emoji that has no Premium ID is replaced by a
+# Premium fallback (a globe for flags, a blue spark for everything else)
+# instead of leaking through as a plain emoji.  Plain typographic symbols
+# the owner explicitly wants kept (◍ ➔ ➜ → ←) and name symbols such as ☻
+# are not emojis and are left untouched.
+_GLOBE_PREMIUM_ID = "5399898266265475100"  # 🌍 in _OWNER_CUSTOM_EMOJI_IDS
+_FALLBACK_PREMIUM_ID = "5980787993139481991"  # 🔹 in _OWNER_CUSTOM_EMOJI_IDS
+_KEEP_PLAIN_SYMBOLS = _PLAIN_UNICODE_SYMBOLS | {"☻", "☺", "♥", "♡", "★", "☆", "•", "·"}
+_FLAG_RE = re.compile(r"[\U0001F1E6-\U0001F1FF]")
+_UNMAPPED_EMOJI_RE = re.compile(
+    r"[\U0001F1E6-\U0001F1FF]{1,2}"
+    r"|[\U0001F000-\U0001FAFF\u2600-\u27BF](?:\ufe0f)?"
+    r"(?:\u200d[\U0001F000-\U0001FAFF\u2600-\u27BF](?:\ufe0f)?)*"
+    r"|[\ufe0f\u200d\u20e3]"
+)
+
+
+def _is_flag_token(token: str) -> bool:
+    return bool(_FLAG_RE.search(token))
+
+
+def _fallback_premium_tag(token: str) -> str:
+    """Premium replacement tag for an emoji that has no Premium ID of its own."""
+    if not token.strip("\ufe0f\u200d\u20e3"):
+        return ""
+    if _is_flag_token(token):
+        return f'<tg-emoji emoji-id="{_GLOBE_PREMIUM_ID}">🌍</tg-emoji>'
+    return f'<tg-emoji emoji-id="{_FALLBACK_PREMIUM_ID}">🔹</tg-emoji>'
+
+
+def _replace_unmapped_emoji(text: str) -> str:
+    """Replace every remaining (unmapped) emoji with a Premium fallback."""
+
+    def repl(match: re.Match) -> str:
+        token = match.group(0)
+        if token in _KEEP_PLAIN_SYMBOLS:
+            return token
+        return _fallback_premium_tag(token)
+
+    return _UNMAPPED_EMOJI_RE.sub(repl, text)
+
+
+def strip_plain_emoji(text: str) -> str:
+    """Remove emoji from plain-text surfaces that cannot show Premium emoji.
+
+    Used for callback-query toasts/alerts (``answerCallbackQuery`` has no
+    custom-emoji support) and for button labels, where the Premium icon is
+    carried separately by ``icon_custom_emoji_id``.
+    """
+
+    def repl(match: re.Match) -> str:
+        token = match.group(0)
+        return token if token in _KEEP_PLAIN_SYMBOLS else ""
+
+    cleaned = _EMOJI_PATTERN.sub(repl, str(text or ""))
+    cleaned = _UNMAPPED_EMOJI_RE.sub(repl, cleaned)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
 
 def emoji_id(emoji: str) -> str | None:
@@ -243,16 +312,28 @@ def emoji_id(emoji: str) -> str | None:
 
 
 def _premium_text(text: str) -> str:
-    """Replace visible Unicode emoji with Rich HTML ``tg-emoji`` elements."""
+    """Replace visible Unicode emoji with Rich HTML ``tg-emoji`` elements.
+
+    Emojis with a Premium ID become that Premium emoji.  Emojis without one
+    (flags, 🎲, dynamic/API/user-supplied emoji, …) become a Premium globe /
+    spark fallback, so a normal emoji is never displayed next to Premium ones.
+    """
     parts = _TAG_SPLIT.split(text)
     for index in range(0, len(parts), 2):
-        parts[index] = _EMOJI_PATTERN.sub(
+        replaced = _EMOJI_PATTERN.sub(
             lambda match: (
                 f'<tg-emoji emoji-id="{EMOJI_IDS[match.group(0)]}">'
                 f"{match.group(0)}</tg-emoji>"
             ),
             parts[index],
         )
+        # Replace unmapped emoji only outside the tg-emoji tags just inserted.
+        subparts = re.split(
+            r"(<tg-emoji\b[^>]*>.*?</tg-emoji>)", replaced, flags=re.I | re.S
+        )
+        for sub_index in range(0, len(subparts), 2):
+            subparts[sub_index] = _replace_unmapped_emoji(subparts[sub_index])
+        parts[index] = "".join(subparts)
     return "".join(parts)
 
 
@@ -399,6 +480,24 @@ def premium_button(
             stripped_text = _clean_leading_symbol(stripped_text, symbol)
             break
 
+    # Any emoji anywhere in the label (leading, middle or trailing, e.g.
+    # "S1: 🟢 ON", "🇮🇳 India", "Next ➡️") becomes the Premium button icon.
+    # The emoji character itself is removed from the visible label below, so
+    # a normal emoji never sits next to the Premium icon.
+    if not custom_id:
+        for symbol in _SORTED_EMOJIS:
+            if symbol in stripped_text:
+                custom_id = EMOJI_IDS[symbol]
+                break
+    if not custom_id:
+        unmapped = _UNMAPPED_EMOJI_RE.search(stripped_text)
+        if unmapped and unmapped.group(0) not in _KEEP_PLAIN_SYMBOLS:
+            custom_id = (
+                _GLOBE_PREMIUM_ID
+                if _is_flag_token(unmapped.group(0))
+                else _FALLBACK_PREMIUM_ID
+            )
+
     # Secondary detection for buttons without a leading emoji
     if not custom_id:
         lower = stripped_text.lower()
@@ -416,16 +515,13 @@ def premium_button(
             custom_id = EMOJI_IDS.get("💱")
         elif stripped_text.startswith("$"):
             custom_id = EMOJI_IDS.get("💵")
-        else:
-            # Look for any known emoji inside the button label (e.g. "S1: 🟢 ON")
-            for symbol in _SORTED_EMOJIS:
-                if symbol in stripped_text:
-                    custom_id = EMOJI_IDS[symbol]
-                    break
-
     if custom_id:
         updates["icon_custom_emoji_id"] = custom_id
-    updates["text"] = convert_currency(stripped_text or raw_text, currency)
+    # Remove every emoji character from the visible label (the Premium icon
+    # above carries it now) and collapse the leftover spacing.
+    cleaned_text = strip_plain_emoji(stripped_text)
+    cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip(" ·-") or "•"
+    updates["text"] = convert_currency(cleaned_text, currency)
     return button.model_copy(update=updates)
 
 
@@ -484,15 +580,38 @@ def _plain_caption(text: str | None, currency: str | None) -> str | None:
 
 
 def _premium_rich_text(text: str):
+    """Split plain caption text into text + Premium custom-emoji parts.
+
+    Emojis without a Premium ID become a Premium globe/spark fallback, never
+    a plain (normal) emoji part.
+    """
+    if RichTextCustomEmoji is None:
+        return text
+    combined = re.compile(
+        f"(?:{_EMOJI_PATTERN.pattern})|(?:{_UNMAPPED_EMOJI_RE.pattern})"
+    )
     parts = []
     position = 0
-    for match in _EMOJI_PATTERN.finditer(text):
+    for match in combined.finditer(text):
         if match.start() > position:
             parts.append(text[position:match.start()])
         symbol = match.group(0)
-        parts.append(RichTextCustomEmoji(
-            custom_emoji_id=EMOJI_IDS[symbol], alternative_text=symbol
-        ))
+        if symbol in _KEEP_PLAIN_SYMBOLS:
+            parts.append(symbol)
+        elif not symbol.strip("\ufe0f\u200d\u20e3"):
+            pass  # stray variation selector / joiner: drop it
+        elif symbol in EMOJI_IDS:
+            parts.append(RichTextCustomEmoji(
+                custom_emoji_id=EMOJI_IDS[symbol], alternative_text=symbol
+            ))
+        elif _is_flag_token(symbol):
+            parts.append(RichTextCustomEmoji(
+                custom_emoji_id=_GLOBE_PREMIUM_ID, alternative_text="🌍"
+            ))
+        else:
+            parts.append(RichTextCustomEmoji(
+                custom_emoji_id=_FALLBACK_PREMIUM_ID, alternative_text="🔹"
+            ))
         position = match.end()
     if position < len(text):
         parts.append(text[position:])
@@ -579,6 +698,16 @@ def _common_rich_send(method: Any, rich_message: InputRichMessage, currency: str
 
 
 def _upgrade_method(method: Any, currency: str | None = None) -> Any:
+    # Callback toasts/alerts cannot carry Premium custom emoji (the Bot API
+    # has no entities/custom-emoji field for answerCallbackQuery), so strip
+    # emoji from their text instead of showing normal emoji next to the
+    # Premium emojis used in messages and buttons.
+    if isinstance(method, AnswerCallbackQuery):
+        if method.text:
+            cleaned = strip_plain_emoji(method.text)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip() or "Done"
+            return method.model_copy(update={"text": cleaned})
+        return method
     if SendRichMessage is None or InputRichMessage is None:
         updates: dict[str, Any] = {"reply_markup": premium_markup(getattr(method, "reply_markup", None), currency)}
         if isinstance(method, (SendMessage, EditMessageText)):
@@ -673,6 +802,12 @@ class RichBot(Bot):
             return await super().__call__(upgraded, request_timeout=request_timeout)
         except TelegramBadRequest as exc:
             if upgraded is method:
+                raise
+            if not isinstance(
+                method, (SendMessage, EditMessageText, EditMessageCaption, *_MEDIA_METHODS)
+            ):
+                # No classic fallback exists for this method type (e.g.
+                # answerCallbackQuery toasts); surface the original error.
                 raise
             # Keep the complete old behavior as a compatibility/error fallback.
             log.warning("Rich message rejected; using classic fallback: %s", exc)
