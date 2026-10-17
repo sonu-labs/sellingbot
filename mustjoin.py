@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from aiogram import types
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -9,6 +10,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import MUST_JOIN_CHANNEL, SUPPORT_USERNAME, UPDATES_CHANNEL
 from db import settings_col
 from rich_messages import premium_button, tg_icon
+
+log = logging.getLogger("tga.mustjoin")
 
 PRIVATE_CHANNEL_ID = int(MUST_JOIN_CHANNEL)
 SECOND_CHANNEL_ID = int(os.getenv("MUST_JOIN_CHANNEL_2", "-1004437680505"))
@@ -115,7 +118,13 @@ def remove_force_sub_channel(index: int) -> tuple[bool, dict | None]:
 
 
 async def check_join(client, event) -> bool:
-    """Check all configured force-join channels for a Message, CallbackQuery, or user_id."""
+    """Check all configured force-join channels for a Message, CallbackQuery, or user_id.
+
+    Membership is only enforced when the bot can actually verify it. If a channel
+    cannot be checked (bot is not an admin there, chat removed, network hiccup…),
+    that channel is skipped instead of permanently locking every user out — which
+    would make buttons such as "Back" / "Verify Join" loop forever.
+    """
     if not is_force_sub_enabled():
         return True
     channels = get_force_sub_channels()
@@ -127,10 +136,24 @@ async def check_join(client, event) -> bool:
     for ch in channels:
         try:
             member = await client.get_chat_member(ch["id"], user_id)
-            if member.status in {"left", "kicked"}:
+        except Exception as exc:
+            desc = str(exc).lower()
+            if any(
+                marker in desc
+                for marker in ("user not found", "user not participant", "user_not_participant")
+            ):
+                # Telegram explicitly says this user is not a member.
                 all_joined = False
                 break
-        except Exception:
+            # The bot cannot verify this channel (missing admin rights, unknown
+            # chat, transient failure) — do not punish the user for it.
+            log.warning("force-sub: cannot verify membership for %s: %s", ch.get("id"), exc)
+            continue
+        status = getattr(member, "status", None)
+        if status in {"left", "kicked"}:
+            all_joined = False
+            break
+        if status == "restricted" and not getattr(member, "is_member", True):
             all_joined = False
             break
 
@@ -140,7 +163,10 @@ async def check_join(client, event) -> bool:
     if not isinstance(event, int):
         target_msg = event.message if isinstance(event, types.CallbackQuery) else event
         if target_msg is not None:
-            await send_join_message(target_msg)
+            try:
+                await send_join_message(target_msg)
+            except Exception as exc:
+                log.warning("force-sub: could not send join prompt: %s", exc)
     return False
 
 

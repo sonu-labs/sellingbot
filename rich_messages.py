@@ -443,6 +443,34 @@ def premium_markup(markup: Any, currency: str | None = None) -> Any:
     )
 
 
+async def safe_edit_or_send(
+    bot: Any,
+    message: Any,
+    text: str,
+    reply_markup: Any = None,
+    parse_mode: str = "HTML",
+) -> Any:
+    """Edit ``message`` when possible, otherwise send a fresh message.
+
+    Keeps navigation buttons (Back / Buy WhatsApp / …) working when the source
+    message is an ``InaccessibleMessage`` (too old), was deleted, can no longer be
+    edited, or already shows the requested content (``message is not modified``).
+    """
+    edit_text = getattr(message, "edit_text", None)
+    if edit_text is not None:
+        try:
+            return await edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return message
+            log.warning("edit failed, sending a new message instead: %s", exc)
+    answer = getattr(message, "answer", None)
+    if answer is not None:
+        return await answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    chat_id = getattr(getattr(message, "chat", None), "id", None)
+    return await bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
+
+
 _MEDIA_METHODS = (SendPhoto, SendVideo, SendDocument, SendAudio, SendAnimation, SendVoice)
 
 
