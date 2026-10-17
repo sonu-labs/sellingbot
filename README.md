@@ -5,8 +5,10 @@ A production-ready Telegram marketplace bot for digital accounts, social-media s
 ## Highlights
 
 - **Native Telegram Rich Messages** (Bot API 10.3) for text, edits and media blocks, with automatic classic fallback
-- **Premium custom emoji** in message text, media captions and buttons, loaded from the bundled `EMOJI_IDS` packs
+- **Premium custom emoji only** in message text, media captions and buttons, loaded from the bundled `EMOJI_IDS` packs — emojis without a Premium ID (flags, etc.) are automatically replaced with a Premium fallback, and callback toasts (which cannot carry custom emoji) are shown without emoji. The one exception is **country lists**: country buttons are plain country names with no per-country Premium icon (every other button keeps its Premium icon)
 - Official bot username: **@TGAStoreAPIBot**
+- **$1 = ₹100** everywhere: Server 2 / Server 3 prices, wallet USD display, display-currency conversion and USDT/crypto deposits all use the same 100 rate
+- **Referral Commission** (not a deposit commission): when a referred user deposits, the *referrer* earns the admin-set `refer_commission_percent` % of that deposit; the depositor receives only their own deposit. Set it from **Admin → Refer & Commission** or `/setrefercomm <percent>`
 - English, Russian, Arabic (Saudi Arabia), Chinese and Indonesian onboarding
 - User-selectable INR (`₹`) or USD (`$`) display currency
 - Telegram and WhatsApp account marketplace, SMM reseller, product store and recharge flows
@@ -33,6 +35,7 @@ A production-ready Telegram marketplace bot for digital accounts, social-media s
 - `ADMIN_IDS` — comma-separated Telegram user IDs
 - `MONGO_URI` — MongoDB connection string
 - `API_ID` and `API_HASH` — Telegram application credentials for Telethon flows
+- `TGLION_API_KEY`, `TGLION_ID` and `TGPVA_API_KEY` — Server 2 provider credentials (previously hard-coded in source; rotate any key that was ever committed)
 
 All API keys and credentials must stay in environment variables. Never commit a populated `.env` file.
 

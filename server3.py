@@ -21,6 +21,7 @@ from rich_messages import (
     wa_icon,
     premium_button,
     safe_edit_or_send,
+    plain_country_label,
 )
 
 TEMPORASMS_BASE = "https://api.temporasms.com/stubs/handler_api.php"
@@ -35,10 +36,14 @@ RETRY_DELAY_SECONDS = 1.5
 RATE_LIMIT_RETRY_DELAY = 3.0
 
 def flag_emoji(alpha2):
-    try:
-        return "".join(chr(0x1F1E6 + ord(c) - ord('A')) for c in alpha2.upper())
-    except Exception:
-        return "🏳️"
+    """Premium country icon for a country code.
+
+    Country-flag emojis have no Premium custom-emoji IDs in the bundled
+    packs (almost none exist), and a normal emoji must never be shown next to
+    Premium ones — so every country uses the Premium globe icon and the
+    country name/code carries the actual identity.
+    """
+    return "🌍"
 
 LZT_COUNTRY_MAP = {
     "ABW": ("AW", "Aruba"), "AFG": ("AF", "Afghanistan"), "AGO": ("AO", "Angola"),
@@ -152,7 +157,7 @@ def mask_phone(number):
 
 def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
                                admin_ids, ADMINLOG, SALES, TEMPORASMS_API_KEY,
-                               BOTUSER, CHANNEL, exchange_rate=95.0):
+                               BOTUSER, CHANNEL, exchange_rate=100.0):  # $1 = ₹100 everywhere
 
     s3_catalog = db["s3_catalog"]
     lzt_orders = db["lzt_orders"]
@@ -447,9 +452,10 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         text = (
             f"<h2>🛰️ Server 3 & LZT Manager</h2>"
             f"<blockquote>"
-            f"{wa_icon()} <b>WhatsApp (TemporaSMS):</b> <code>{tempora_bal:.4f} USDT</code> ({'🟢 ON' if s3_wa == 'on' else '🔴 OFF'})\n"
-            f"{tg_icon()} <b>Telegram (LZT Market):</b> Margin <code>{lzt_margin}%</code> ({'🟢 ON' if lzt_enabled else '🔴 OFF'})\n"
-            f"⚙️ <b>USD Display:</b> <code>{usd_disp.upper()}</code>  •  🐛 <b>Debug:</b> <code>{debug_mode.upper()}</code>"
+            f"{wa_icon()} <b>WhatsApp (TemporaSMS):</b> <code>{tempora_bal:.4f} USDT</code> ({'🟢 ON' if s3_wa == 'on' else '🔴 OFF'})<br>"
+            f"{tg_icon()} <b>Telegram (LZT Market):</b> Margin <code>{lzt_margin}%</code> ({'🟢 ON' if lzt_enabled else '🔴 OFF'})<br>"
+            f"⚙️ <b>USD Display:</b> <code>{usd_disp.upper()}</code><br>"
+            f"🐛 <b>Debug:</b> <code>{debug_mode.upper()}</code>"
             f"</blockquote>"
             f"<p><i>Configure live WhatsApp OTP catalogs, LZT Market API tokens, profit margins, and diagnostics below:</i></p>"
         )
@@ -602,21 +608,22 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             return
         await state.update_data(country_code=country_code, country_name=country_name)
         await checking.edit_text(f"✅ <b>Country:</b> {country_name}", parse_mode="HTML")
-        await msg.answer("🚩 <b>Send a flag emoji for this country:</b>\n<i>(or type 'skip')</i>", parse_mode="HTML")
+        await msg.answer("🌍 <b>Country icon:</b> <i>A Premium globe icon is shown automatically — type 'skip' to continue.</i>", parse_mode="HTML")
         await state.set_state(Server3Admin.waiting_flag)
 
     @dp.message(StateFilter(Server3Admin.waiting_country_name))
     async def s3_add_cn(msg: Message, state: FSMContext):
         await state.update_data(country_name=msg.text.strip())
-        await msg.answer("🚩 <b>Send a flag emoji for this country:</b>\n<i>(or type 'skip')</i>", parse_mode="HTML")
+        await msg.answer("🌍 <b>Country icon:</b> <i>A Premium globe icon is shown automatically — type 'skip' to continue.</i>", parse_mode="HTML")
         await state.set_state(Server3Admin.waiting_flag)
 
     @dp.message(StateFilter(Server3Admin.waiting_flag))
     async def s3_add_flag(msg: Message, state: FSMContext):
-        flag = msg.text.strip()
+        # Flag emojis are never stored in country names: they have no Premium
+        # custom-emoji IDs and would show as normal emoji.  The Premium globe
+        # icon is added at display time instead, so any text sent here is
+        # simply treated as "continue".
         data = await state.get_data()
-        if flag.lower() != "skip":
-            await state.update_data(country_name=f"{data['country_name']} {flag}")
         operators = await get_all_operators()
         kb = InlineKeyboardBuilder()
         for op in operators:
@@ -856,7 +863,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             )
         kb = InlineKeyboardBuilder()
         for c in countries:
-            kb.button(text=c['name'], callback_data=f"s3_user_ops:{category}:{c['_id']}")
+            kb.button(text=plain_country_label(c['name']), callback_data=f"s3_user_ops:{category}:{c['_id']}")
         kb.adjust(2)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="back_main"))
         text = (
@@ -884,7 +891,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             kb.button(text=btn, callback_data=f"s3_user_terms:{str(item['_id'])}")
         kb.adjust(1)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data=f"buy_server3:{category}"))
-        disc_line = f"\n🏷️ <b>VIP Discount Active:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
+        disc_line = f"<br>🏷️ <b>VIP Discount Active:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
         text = (
             f"<h2>{cm['emoji']} {cm['name']} — {country_name}</h2>"
             f"<blockquote>📶 <b>Select an operator line below:</b>{disc_line}</blockquote>"
@@ -902,7 +909,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         inr_p = apply_user_discount(item['sell_price_inr'], cq.from_user.id)
         usd_p = inr_p / exchange_rate
         price_label = f"₹{inr_p:.2f} | ${usd_p:.2f}" if usd_toggle == "on" else f"₹{inr_p:.2f}"
-        disc_line = f"\n🏷️ <b>VIP Discount:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
+        disc_line = f"<br>🏷️ <b>VIP Discount:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
         text = (
             "<h2>🛒 Order Confirmation & Terms</h2>"
             "<blockquote>"
@@ -1278,7 +1285,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             return "<h2>📭 No Countries Found</h2><p>No countries matched your search query.</p>", kb.as_markup()
 
         for c in page_items:
-            btn_text = f"{c['flag']} {c['name']}"
+            btn_text = plain_country_label(c['name'])
             kb.button(text=btn_text, callback_data=f"s3tg_country:{c['code']}:0")
         kb.adjust(2)
 
@@ -1315,7 +1322,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             countries = list(s3_catalog.aggregate(pipeline))
             kb = InlineKeyboardBuilder()
             for c in countries:
-                kb.button(text=c['name'], callback_data=f"s3_user_ops:wa:{c['_id']}")
+                kb.button(text=plain_country_label(c['name']), callback_data=f"s3_user_ops:wa:{c['_id']}")
             kb.adjust(2)
             kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="back_main"))
             text = (
@@ -1543,7 +1550,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         kb.row(InlineKeyboardButton(text="🔄 Refresh", callback_data=f"s3tg_country:{country_code}:{vpage}"), InlineKeyboardButton(text="🔙 Back", callback_data="s3tg_open"))
 
         disc = get_user_discount(cq.from_user.id)
-        disc_line = f"\n🏷️ <b>VIP Discount Active:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
+        disc_line = f"<br>🏷️ <b>VIP Discount Active:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
         text = (
             f"<h2>{tg_icon()} TG Accounts — {country_meta['flag']} {country_meta['name']}</h2>"
             f"<blockquote>🛒 Showing <b>{len(page_items)}</b> live accounts on this page. Tap an account below to preview & buy:{disc_line}</blockquote>"
@@ -1603,22 +1610,26 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         last_seen = format_time_ago(item.get("telegram_last_seen"))
         login_type = str(item.get("login_type", "Unknown")).capitalize()
         dc_id = item.get("telegram_dc_id", "Unknown")
-        disc_line = f"\n🏷️ <b>VIP Discount:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
+        disc_line = f"<br>🏷️ <b>VIP Discount:</b> <code>{disc:g}% OFF</code>" if disc > 0 else ""
     
         text = (
             f"<h2>✨ {tg_icon()} Account Preview</h2>"
             f"<blockquote>"
-            f"🌍 <b>{country_meta['flag']} {country_meta['name']}</b> (<code>{country_code}</code>)\n"
-            f"💰 <b>Price:</b> <code>₹{sell_price:.0f}</code>  •  💎 <b>Your Balance:</b> <code>₹{balance:.2f}</code>{disc_line}"
+            f"🌍 <b>{country_meta['name']}</b> (<code>{country_code}</code>)<br>"
+            f"💰 <b>Price:</b> <code>₹{sell_price:.0f}</code><br>"
+            f"💎 <b>Your Balance:</b> <code>₹{balance:.2f}</code>{disc_line}"
             f"</blockquote>"
             f"<p><b>📋 Account Specifications:</b></p>"
             f"<blockquote>"
-            f"• <b>Origin:</b> <i>{origin}</i>\n"
-            f"• <b>Login Type:</b> <code>{login_type}</code>  •  <b>Data Center:</b> <code>DC {dc_id}</code>\n"
-            f"• <b>Premium:</b> {premium}  •  <b>2FA:</b> {password_set}\n"
-            f"• <b>Attached Email:</b> {email_linked}\n"
-            f"• <b>Contacts:</b> <code>{contacts}</code>  •  <b>Chats:</b> <code>{chats}</code>\n"
-            f"• <b>Spam Status:</b> {spam_status}\n"
+            f"• <b>Origin:</b> <i>{origin}</i><br>"
+            f"• <b>Login Type:</b> <code>{login_type}</code><br>"
+            f"• <b>Data Center:</b> <code>DC {dc_id}</code><br>"
+            f"• <b>Premium:</b> {premium}<br>"
+            f"• <b>2FA:</b> {password_set}<br>"
+            f"• <b>Attached Email:</b> {email_linked}<br>"
+            f"• <b>Contacts:</b> <code>{contacts}</code><br>"
+            f"• <b>Chats:</b> <code>{chats}</code><br>"
+            f"• <b>Spam Status:</b> {spam_status}<br>"
             f"• <b>Last Active:</b> <i>{last_seen}</i>"
             f"</blockquote>"
             f"<p>⚠️ <i>Automated market account — health is verified before purchase. All sales are final.</i></p>"
@@ -2065,15 +2076,15 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         text = (
             f"<h2>📊 LZT Market Admin Dashboard</h2>"
             f"<blockquote>"
-            f"👤 <b>Account:</b> <code>{username}</code> (ID: <code>{user_id}</code>)\n"
-            f"💵 <b>Available USD:</b> <code>${balance_usd}</code>\n"
-            f"🇷🇺 <b>Available RUB:</b> <code>₽{balance_rub}</code>\n"
+            f"👤 <b>Account:</b> <code>{username}</code> (ID: <code>{user_id}</code>)<br>"
+            f"💵 <b>Available USD:</b> <code>${balance_usd}</code><br>"
+            f"💰 <b>Available RUB:</b> <code>₽{balance_rub}</code><br>"
             f"🔒 <b>Funds on Hold:</b> <code>₽{hold_rub}</code>"
             f"</blockquote>"
             f"<p><b>🤖 Server 3 Bot Sales Summary:</b></p>"
             f"<blockquote>"
-            f"🛍️ <b>Total Accounts Sold:</b> <code>{total_s3_sold}</code>\n"
-            f"📈 <b>Total INR Earned:</b> <code>₹{total_inr_earned:.2f}</code>\n"
+            f"🛍️ <b>Total Accounts Sold:</b> <code>{total_s3_sold}</code><br>"
+            f"📈 <b>Total INR Earned:</b> <code>₹{total_inr_earned:.2f}</code><br>"
             f"📉 <b>Total LZT Spent:</b> <code>${total_usd_spent:.2f}</code>"
             f"</blockquote>"
         )
