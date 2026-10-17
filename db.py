@@ -1,10 +1,16 @@
 from datetime import datetime
 from sqlalchemy import create_engine, Integer, String, Float, DateTime, ForeignKey, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
-from config import DATABASE_URL
+from pymongo import MongoClient
+from config import DATABASE_URL, MONGO_URI
 
 engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+# MongoDB collections shared with the Telegram bot (mustjoin force-sub settings etc.)
+mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=15000)
+mongo_db = mongo_client["TGAStoreBot"]
+settings_col = mongo_db["settings"]
 
 class Base(DeclarativeBase):
     pass

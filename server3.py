@@ -20,6 +20,7 @@ from rich_messages import (
     tg_icon,
     wa_icon,
     premium_button,
+    safe_edit_or_send,
 )
 
 TEMPORASMS_BASE = "https://api.temporasms.com/stubs/handler_api.php"
@@ -846,9 +847,11 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         pipeline = [{"$match": {"category": category}}, {"$group": {"_id": "$country_code", "name": {"$first": "$country_name"}}}]
         countries = list(s3_catalog.aggregate(pipeline))
         if not countries:
-            return await cq.message.edit_text(
+            await cq.answer()
+            return await safe_edit_or_send(
+                bot,
+                cq.message,
                 "<h2>📭 No Countries Available</h2><p>All regions are temporarily out of stock. Please check back shortly.</p>",
-                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="back_main")]]),
             )
         kb = InlineKeyboardBuilder()
@@ -861,7 +864,8 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             f"<blockquote>🌍 <b>Select a Region Below:</b></blockquote>"
             f"<p><i>⚡ Instant automated SMS OTP delivery with auto-refund protection.</i></p>"
         )
-        await cq.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
+        await cq.answer()
+        await safe_edit_or_send(bot, cq.message, text, reply_markup=kb.as_markup())
 
     @dp.callback_query(F.data.startswith("s3_user_ops:"))
     async def user_s3_operators(cq: CallbackQuery):
@@ -885,6 +889,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
             f"<h2>{cm['emoji']} {cm['name']} — {country_name}</h2>"
             f"<blockquote>📶 <b>Select an operator line below:</b>{disc_line}</blockquote>"
         )
+        await cq.answer()
         await cq.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
     @dp.callback_query(F.data.startswith("s3_user_terms:"))
@@ -918,6 +923,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text="✅ Accept & Reserve", callback_data=f"s3_final_buy:{str(item['_id'])}"))
         kb.row(InlineKeyboardButton(text="🔙 Cancel", callback_data=f"s3_user_ops:{item['category']}:{item['country_code']}"))
+        await cq.answer()
         await cq.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
     async def process_s3_refund(user_id, order_id, item_id):
         order = orders_col.find_one({"order_id": order_id})
@@ -1017,6 +1023,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         if user.get("balance", 0.0) < inr_price:
             return await cq.answer("❌ Insufficient Balance!", show_alert=True)
 
+        await cq.answer("⏳ Reserving your number...")
         status_msg = await cq.message.edit_text(
             "<h2>⏳ Allocating Number...</h2><p><i>Connecting to Server 3 and reserving your line...</i></p>",
             parse_mode="HTML",
@@ -1078,6 +1085,66 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         await status_msg.edit_text(ui_text, parse_mode="HTML", reply_markup=kb.as_markup())
         asyncio.create_task(auto_otp_checker_s3(user_id, order_id, phone_number, item_id, status_msg.message_id))
 
+    @dp.callback_query(F.data.startswith("s3_otp:"))
+    async def srv3_get_otp(cq: CallbackQuery):
+        """Manual 'Get OTP' tap: fetch the latest provider status for this order."""
+        parts = cq.data.split(":")
+        order_id = parts[1] if len(parts) > 1 else ""
+        user_id = cq.from_user.id
+
+        order = orders_col.find_one({"order_id": order_id})
+        if not order or order.get("user_id") != user_id:
+            return await cq.answer("❌ Order not found.", show_alert=True)
+
+        def render_otp(otp_code: str):
+            cm = category_meta("wa")
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📋 Copy OTP Code", copy_text=CopyTextButton(text=otp_code))]
+            ])
+            text = (
+                f"<h2>✅ Order Completed</h2>"
+                f"<blockquote>"
+                f"{cm['emoji']} <b>App:</b> {cm['name']}\n"
+                f"📞 <b>Number:</b> <code>{order.get('number', '')}</code>\n"
+                f"🔑 <b>OTP Code:</b> <code>{otp_code}</code>"
+                f"</blockquote>"
+                f"<p><i>Tap the button below to copy your OTP code!</i></p>"
+            )
+            return text, kb
+
+        # Already delivered earlier (e.g. by the auto-poller)
+        if order.get("status") == "completed" and order.get("otp"):
+            text, kb = render_otp(order["otp"])
+            await cq.answer()
+            return await safe_edit_or_send(bot, cq.message, text, reply_markup=kb)
+
+        url = f"{TEMPORASMS_BASE}?api_key={TEMPORASMS_API_KEY}&action=getStatus&id={order_id}"
+        raw = await s3_api_call(f"TemporaSMS: Manual OTP Check (Order:{order_id})", url)
+
+        if "STATUS_OK:" in raw:
+            otp_code = raw.split(":", 1)[1].strip()
+            orders_col.update_one({"order_id": order_id}, {"$set": {"status": "completed", "otp": otp_code}})
+            text, kb = render_otp(otp_code)
+            await cq.answer("✅ OTP received!")
+            return await safe_edit_or_send(bot, cq.message, text, reply_markup=kb)
+
+        if "STATUS_CANCEL" in raw:
+            success, refund_amount = await process_s3_refund(user_id, order_id, order.get("item_id"))
+            refund_line = f"<blockquote>💰 <b>Refunded:</b> <code>₹{refund_amount:.2f}</code></blockquote>" if success else ""
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data=f"buy_server3:wa")]])
+            await cq.answer("⚠️ Order was cancelled.")
+            return await safe_edit_or_send(
+                bot,
+                cq.message,
+                f"<h2>⚠️ Order Cancelled</h2>{refund_line}<p>This number was cancelled before an OTP arrived.</p>",
+                reply_markup=kb,
+            )
+
+        await cq.answer(
+            "⏳ SMS not received yet. Auto-polling is active — we'll notify you the moment it arrives.",
+            show_alert=True,
+        )
+
     @dp.callback_query(F.data.startswith("s3_cancel:"))
     async def srv3_cancel_number(cq: CallbackQuery):
         order_id, item_id = cq.data.split(":")[1], cq.data.split(":")[2]
@@ -1105,7 +1172,6 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
                     show_alert=True
                 )
 
-        await cq.answer("🔄 Cancelling order...", show_alert=False)
         url = f"{TEMPORASMS_BASE}?api_key={TEMPORASMS_API_KEY}&action=setStatus&status=8&id={order_id}"
         text = await s3_api_call(f"TemporaSMS: Manual Cancel (User:{user_id})", url)
         
@@ -1115,6 +1181,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         success, refund_amount = await process_s3_refund(user_id, order_id, item_id)
         if success:
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to Menu", callback_data="back_main")]])
+            await cq.answer("✅ Order cancelled and refunded.")
             await cq.message.edit_text(
                 f"<h2>❌ Order Cancelled</h2><blockquote>💰 <b>Refunded:</b> <code>₹{refund_amount:.2f}</code></blockquote>", 
                 parse_mode="HTML", 
@@ -1159,20 +1226,18 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
         if not success:
             return await cq.answer("❌ Could not cancel current number.", show_alert=True)
             
-        await cq.answer("🔄 Getting a new number...", show_alert=False)
         item = s3_catalog.find_one({"_id": ObjectId(item_id)})
         if not item:
+            await cq.answer("❌ Catalog item unavailable.", show_alert=True)
             return await cq.message.edit_text("<h2>❌ Catalog Item Unavailable</h2>", parse_mode="HTML")
             
         status_msg = await cq.message.edit_text("<h2>⏳ Replacing Number...</h2><p><i>Previous number cancelled. Reserving a new line...</i></p>", parse_mode="HTML")
-        
-        await srv3_buy_execution(types.CallbackQuery(
-            id=cq.id, 
-            from_user=cq.from_user, 
-            chat_instance=cq.chat_instance, 
-            message=status_msg, 
-            data=f"s3_final_buy:{item_id}"
-        ))
+
+        # model_copy keeps the bot mounted on the query so cq.answer()/edits work
+        await srv3_buy_execution(cq.model_copy(update={
+            "message": status_msg,
+            "data": f"s3_final_buy:{item_id}",
+        }))
 
     # ============================================================
     # ==================  TG (LZT): USER BUY FLOW  ==================

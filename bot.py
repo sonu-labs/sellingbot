@@ -60,6 +60,7 @@ from rich_messages import (
     api_icon,
     upi_icon,
     premium_button,
+    safe_edit_or_send,
 )
 from i18n import LANGUAGES, CURRENCIES, tr, format_balance, language_name
 
@@ -762,7 +763,7 @@ def build_main_menu(user_id: int, full_name: str) -> tuple[str, InlineKeyboardMa
 async def show_main(target: Message, user_id: int, full_name: str, edit: bool = False):
     text, markup = build_main_menu(user_id, full_name)
     if edit:
-        await target.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        await safe_edit_or_send(bot, target, text, reply_markup=markup)
     else:
         await target.answer(text, parse_mode="HTML", reply_markup=markup)
 
@@ -984,11 +985,11 @@ async def back_main(cq: CallbackQuery):
     )
     user = users_col.find_one({"_id": cq.from_user.id}) or {}
     if not user.get("language"):
-        await cq.message.edit_text("<h2>Choose your language</h2>", reply_markup=language_keyboard())
+        await safe_edit_or_send(bot, cq.message, "<h2>Choose your language</h2>", reply_markup=language_keyboard())
         await cq.answer()
         return
     if not user.get("currency"):
-        await cq.message.edit_text(tr(user, "choose_currency"), reply_markup=currency_keyboard(user))
+        await safe_edit_or_send(bot, cq.message, tr(user, "choose_currency"), reply_markup=currency_keyboard(user))
         await cq.answer()
         return
     await show_main(cq.message, cq.from_user.id, cq.from_user.full_name, edit=True)
