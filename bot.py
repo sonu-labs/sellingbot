@@ -1,5 +1,6 @@
 import secrets
 import string
+import logging
 import bcrypt
 from bson import ObjectId
 import os
@@ -33,6 +34,7 @@ import re
 from aiogram import types
 import random
 from aiogram.types import InputMediaVideo
+from admin_analytics import summarize_analytics, utc_naive
 from recharge_flow import register_recharge_handlers
 from smm import register_smm_handlers
 from server3 import register_server3_handlers
@@ -89,6 +91,9 @@ CHANNEL = UPDATES_CHANNEL
 SALES = SALES_LOG_ID
 SALESLOG = SALES_LOG_CHANNEL
 ADMINLOG = ADMIN_LOG_ID
+logger = logging.getLogger("sellingbot")
+BOT_STARTED_AT = datetime.now(timezone.utc)
+SMM_BACKGROUND_TASK = None
 # ================= STORE DATABASE & FSM =================
 class StoreAdmin(StatesGroup):
     waiting_category = State()
@@ -117,7 +122,13 @@ class FeatureGateMiddleware(BaseMiddleware):
             doc = settings_col.find_one({"_id": "bot_features"}) or {}
             srv = settings_col.find_one({"_id": "server_config"}) or {}
             store_on = doc.get("store_enabled", srv.get("store_status", "on") != "off")
-            if callback.startswith("smm_") and not callback.startswith("smm_adm") and not doc.get("smm_enabled", True):
+            smm_read_only_callbacks = ("smm_open", "smm_status_menu", "smm_history", "smm_rf:")
+            if (
+                callback.startswith("smm_")
+                and not callback.startswith("smm_adm")
+                and not callback.startswith(smm_read_only_callbacks)
+                and not doc.get("smm_enabled", True)
+            ):
                 await event.answer("⚠️ Social Media Services are currently disabled.", show_alert=True)
                 return
             whatsapp_callbacks = ("buy_wa", "buy_server3:wa")
@@ -3794,87 +3805,152 @@ async def callback_refer(cq: CallbackQuery):
     await cq.message.edit_text(text=text, parse_mode="HTML", reply_markup=kb.as_markup())
     await cq.answer()
     
-# ================= ADVANCED /sales COMMAND =================
+# ================= Admin Analytics & Bot Health =================
+def format_uptime(started_at) -> str:
+    started = utc_naive(started_at)
+    if started is None:
+        return "Unknown"
+    seconds = max(0, int((datetime.utcnow() - started).total_seconds()))
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, _ = divmod(remainder, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+async def get_live_bot_status() -> dict:
+    """Report process, Telegram API, and SMM checker health without hardcoding status."""
+    task = SMM_BACKGROUND_TASK
+    if task is None:
+        checker_status = "Not started"
+    elif task.done():
+        checker_status = "Stopped"
+    else:
+        checker_status = "Starting"
+
+    checker_last_run = None
+    checker_error = ""
+    try:
+        smm_config = db["smm_settings"].find_one({"_id": "config"}) or {}
+        checker_last_run = utc_naive(smm_config.get("checker_last_run"))
+        checker_error = str(smm_config.get("checker_last_error") or "")[:240]
+        if task is not None and not task.done():
+            if checker_last_run is None:
+                checker_status = "Starting"
+            else:
+                age = max(0, int((datetime.utcnow() - checker_last_run).total_seconds()))
+                checker_status = "Running" if age <= 300 else "Stale"
+    except Exception as exc:
+        logger.exception("Unable to read SMM checker health")
+        checker_error = str(exc)[:240]
+
+    telegram_status = "Health check unavailable"
+    try:
+        me = await asyncio.wait_for(bot.get_me(), timeout=5)
+        telegram_status = f"Reachable as @{me.username}" if me.username else "Reachable"
+    except Exception as exc:
+        logger.warning("Telegram getMe health check failed: %s", exc)
+        telegram_status = "API check failed; bot process is still responding"
+
+    return {
+        "process": "Running",
+        "telegram": telegram_status,
+        "uptime": format_uptime(BOT_STARTED_AT),
+        "started_at": BOT_STARTED_AT.astimezone(timezone.utc).strftime("%d %b %Y, %H:%M UTC"),
+        "checker": checker_status,
+        "checker_last_run": checker_last_run,
+        "checker_error": checker_error,
+    }
+
+
+def render_bot_health(health: dict) -> str:
+    last_run = health.get("checker_last_run")
+    last_run_text = last_run.strftime("%d %b %Y, %H:%M:%S UTC") if last_run else "No completed cycle yet"
+    error_line = f"<br>⚠️ <b>Last checker error:</b> <code>{escape(health['checker_error'])}</code>" if health.get("checker_error") else ""
+    return (
+        "<h2>🤖 Bot Health &amp; Runtime Status</h2>"
+        "<blockquote>🟢 <b>Bot process:</b> <code>Running</code><br>"
+        f"📡 <b>Telegram API:</b> <code>{escape(health.get('telegram', 'Unknown'))}</code><br>"
+        f"⏱️ <b>Uptime:</b> <code>{escape(health.get('uptime', 'Unknown'))}</code><br>"
+        f"🕒 <b>Started:</b> <code>{escape(health.get('started_at', 'Unknown'))}</code></blockquote>"
+        "<blockquote>🔄 <b>SMM order monitor:</b> <code>{}</code><br>"
+        "📊 <b>Last checker cycle:</b> <code>{}</code>{}</blockquote>"
+    ).format(
+        escape(str(health.get("checker", "Unknown"))),
+        escape(last_run_text),
+        error_line,
+    )
+
+
+async def build_admin_analytics_report() -> str:
+    now = datetime.utcnow()
+    start_of_week = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now.weekday())
+    user_docs = list(users_col.find({"joined_at": {"$gte": start_of_week}}, {"joined_at": 1}))
+    transactions = list(db["transactions"].find(
+        {"status": {"$in": ["paid", "success", "approved"]}},
+        {"status": 1, "amount": 1, "created_at": 1},
+    ))
+    withdrawals = list(db["withdrawals"].find(
+        {"status": "paid"}, {"status": 1, "amount": 1}
+    ))
+    account_orders = list(orders_col.find(
+        {"status": "purchased"}, {"status": 1, "price": 1, "created_at": 1, "country": 1}
+    ))
+    smm_orders = list(db["smm_orders"].find(
+        {}, {"status": 1, "status_norm": 1, "price": 1, "created_at": 1, "refunded": 1}
+    ))
+    metrics = summarize_analytics(
+        total_users=users_col.count_documents({}),
+        user_docs=user_docs,
+        transactions=transactions,
+        withdrawals=withdrawals,
+        account_orders=account_orders,
+        smm_orders=smm_orders,
+        now=now,
+    )
+    health = await get_live_bot_status()
+    return (
+        "<h2>📊 Admin Analytics</h2>"
+        "<blockquote>👥 <b>User Growth</b><br>"
+        f"• Total users: <code>{metrics['total_users']:,}</code><br>"
+        f"• Joined today / this week: <code>{metrics['users_today']:,}</code> / <code>{metrics['users_week']:,}</code></blockquote>"
+        "<blockquote>💰 <b>Wallet Activity (INR)</b><br>"
+        f"• Deposits total: <code>₹{metrics['deposit_total']:,.2f}</code><br>"
+        f"• Deposits today / this week: <code>₹{metrics['deposit_today']:,.2f}</code> / <code>₹{metrics['deposit_week']:,.2f}</code><br>"
+        f"• Withdrawals paid: <code>₹{metrics['withdrawal_total']:,.2f}</code></blockquote>"
+        "<blockquote>🛒 <b>Sales</b><br>"
+        f"• Account orders: <code>{metrics['account_orders']:,}</code> · revenue <code>₹{metrics['account_revenue']:,.2f}</code><br>"
+        f"• Account sales today: <code>{metrics['account_today_count']:,}</code> · revenue <code>₹{metrics['account_today_revenue']:,.2f}</code><br>"
+        f"• Account sales this week: <code>{metrics['account_week_count']:,}</code> · revenue <code>₹{metrics['account_week_revenue']:,.2f}</code><br>"
+        f"• SMM orders: <code>{metrics['smm_orders']:,}</code> · open <code>{metrics['smm_open_orders']:,}</code><br>"
+        f"• SMM net revenue: <code>₹{metrics['smm_net']:,.2f}</code> · refunded <code>₹{metrics['smm_refunds']:,.2f}</code><br>"
+        f"• SMM sales today / week: <code>₹{metrics['smm_today_net']:,.2f}</code> / <code>₹{metrics['smm_week_net']:,.2f}</code><br>"
+        f"• Top account country: <code>{escape(str(metrics['top_country']))}</code></blockquote>"
+        "<blockquote>🤖 <b>Bot Status</b><br>"
+        f"• Process: <code>🟢 Running</code> · uptime <code>{escape(health['uptime'])}</code><br>"
+        f"• Telegram API: <code>{escape(health['telegram'])}</code><br>"
+        f"• SMM monitor: <code>{escape(health['checker'])}</code><br>"
+        f"• Last SMM cycle: <code>{health['checker_last_run'].strftime('%d %b %H:%M UTC') if health['checker_last_run'] else 'not yet'}</code></blockquote>"
+    )
+
+
 @dp.message(Command("sales", "stats"))
 async def cmd_advanced_sales(msg: Message):
     if not is_admin(msg.from_user.id):
         return await msg.answer("❌ <b>You are not authorized to view the sales report.</b>", parse_mode="HTML")
-
-    status_msg = await msg.answer("🔄 <i>Generating advanced analytics... Please wait.</i>", parse_mode="HTML")
-
-    # FIX: Using UTC Now (Naive Datetime) to match MongoDB
-    now = datetime.utcnow()
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    start_of_week = start_of_day - timedelta(days=now.weekday())
-
-    # Helper function to prevent timezone crash (converts aware to naive safely)
-    def make_naive(dt):
-        if not dt: return None
-        return dt.replace(tzinfo=None) if getattr(dt, 'tzinfo', None) else dt
-
-    # Collections
-    users_col = db["users"]
-    orders_col = db["orders"]
-    txns_col = db["transactions"]  
-    wd_col = db["withdrawals"]
-
-    # ---------------- 👥 USERS ANALYTICS ----------------
-    total_users = users_col.count_documents({})
-    # PyMongo handle directly with naive datetimes
-    users_today = users_col.count_documents({"joined_at": {"$gte": start_of_day}})
-    users_week = users_col.count_documents({"joined_at": {"$gte": start_of_week}})
-
-    # ---------------- 💳 DEPOSITS (RECHARGES) ----------------
-    all_txns = list(txns_col.find({"status": {"$in": ["paid", "success"]}}))
-    total_recharge = sum(float(t.get("amount", 0)) for t in all_txns)
-    
-    # Safe python filtering with timezone bypass
-    today_recharge = sum(float(t.get("amount", 0)) for t in all_txns if make_naive(t.get("created_at")) and make_naive(t.get("created_at")) >= start_of_day)
-    week_recharge = sum(float(t.get("amount", 0)) for t in all_txns if make_naive(t.get("created_at")) and make_naive(t.get("created_at")) >= start_of_week)
-
-    # ---------------- 🏦 WITHDRAWALS ----------------
-    all_wds = list(wd_col.find({"status": "paid"}))
-    total_wd = sum(float(w.get("amount", 0)) for w in all_wds)
-
-    # ---------------- 🛒 OTP SALES ANALYTICS ----------------
-    all_orders = list(orders_col.find({"status": "purchased"}))
-    total_sold = len(all_orders)
-    total_sales_inr = sum(float(o.get("price", 0)) for o in all_orders)
-
-    today_orders = [o for o in all_orders if make_naive(o.get("created_at")) and make_naive(o.get("created_at")) >= start_of_day]
-    today_sold = len(today_orders)
-    today_sales_inr = sum(float(o.get("price", 0)) for o in today_orders)
-
-    week_orders = [o for o in all_orders if make_naive(o.get("created_at")) and make_naive(o.get("created_at")) >= start_of_week]
-    week_sold = len(week_orders)
-    week_sales_inr = sum(float(o.get("price", 0)) for o in week_orders)
-
-    # Top Country Logic
-    from collections import Counter
-    country_counts = Counter(o.get("country", "Unknown") for o in all_orders)
-    top_country = country_counts.most_common(1)[0][0] if country_counts else "N/A"
-
-    # ---------------- 📋 BUILD THE REPORT ----------------
-    report = (
-        "<h2>📊 Advanced System Analytics</h2>"
-        "<blockquote>👥 <b>User Metrics</b><br>"
-        f"• <b>Total Users:</b> <code>{total_users:,}</code><br>"
-        f"• <b>Joined Today:</b> <code>{users_today:,}</code><br>"
-        f"• <b>Joined This Week:</b> <code>{users_week:,}</code></blockquote>"
-        "<blockquote>💰 <b>Financial Metrics (INR)</b><br>"
-        f"• <b>Total Deposits:</b> <code>₹{total_recharge:,.2f}</code><br>"
-        f"• <b>Deposits Today:</b> <code>₹{today_recharge:,.2f}</code><br>"
-        f"• <b>Total Withdrawals:</b> <code>₹{total_wd:,.2f}</code></blockquote>"
-        "<blockquote>🛒 <b>OTP Sales Metrics</b><br>"
-        f"• <b>Total Numbers Sold:</b> <code>{total_sold:,}</code><br>"
-        f"• <b>Gross Revenue:</b> <code>₹{total_sales_inr:,.2f}</code><br>"
-        f"• <b>Today's Sales:</b> <code>{today_sold:,}</code> (<code>₹{today_sales_inr:,.2f}</code>)<br>"
-        f"• <b>Weekly Sales:</b> <code>{week_sold:,}</code> (<code>₹{week_sales_inr:,.2f}</code>)<br>"
-        f"• 🌍 <b>Top Country:</b> <code>{top_country}</code></blockquote>"
-        "<blockquote>🤖 <b>Bot Status:</b> <code>🟢 Active</code><br>"
-        f"👨‍💻 <b>Support:</b> @{SUPPORT}</blockquote>"
-    )
-
+    status_msg = await msg.answer("🔄 <i>Loading live analytics and bot health...</i>", parse_mode="HTML")
+    try:
+        report = await build_admin_analytics_report()
+    except Exception as exc:
+        logger.exception("Admin analytics command failed")
+        report = (
+            "<h2>⚠️ Analytics Temporarily Unavailable</h2>"
+            f"<blockquote><code>{escape(str(exc)[:500])}</code></blockquote>"
+            "<p><i>Try again in a moment. The bot health page remains available from /admin.</i></p>"
+        )
     await status_msg.edit_text(report, parse_mode="HTML")
 
 @dp.message(Command("sellcountry"))
@@ -4500,6 +4576,8 @@ async def send_server_dashboard(chat_id, message_id=None):
 # Callbacks for toggles
 @dp.callback_query(F.data.in_(["toggle_s1", "toggle_s2", "toggle_s3", "switch_s2_api", "refresh_dashboard"]))
 async def manage_toggles(cq: CallbackQuery):
+    if not is_admin(cq.from_user.id):
+        return await cq.answer("Not authorized.", show_alert=True)
     action = cq.data
     settings = settings_col.find_one({"_id": "server_config"}) or {"_id": "server_config"}
     
@@ -4520,12 +4598,17 @@ async def manage_toggles(cq: CallbackQuery):
 
 @dp.callback_query(F.data == "set_s2_profit")
 async def set_profit_btn(cq: CallbackQuery, state: FSMContext):
+    if not is_admin(cq.from_user.id):
+        return await cq.answer("Not authorized.", show_alert=True)
     await cq.message.answer("📈 Send the new profit percentage for Server 2 (e.g., send 20 for 20%):")
     await state.set_state(ServerManage.waiting_profit_margin)
     await cq.answer()
 
 @dp.message(StateFilter(ServerManage.waiting_profit_margin))
 async def save_profit_margin(msg: Message, state: FSMContext):
+    if not is_admin(msg.from_user.id):
+        await state.clear()
+        return await msg.answer("❌ Not authorized.")
     try:
         profit = float(msg.text.strip())
         settings_col.update_one({"_id": "server_config"}, {"$set": {"s2_profit": profit}}, upsert=True)
@@ -5039,6 +5122,7 @@ def admin_panel_markup() -> InlineKeyboardMarkup:
             ),
             premium_button(text="📊 Reports & Analytics", callback_data="admin_open:reports"),
         ],
+        [premium_button(text="🤖 Bot Health", callback_data="admin_open:health")],
         [
             premium_button(text="👥 Users & Discounts", callback_data="admin_open:users"),
             premium_button(text="📦 Stock & Countries", callback_data="admin_open:stock"),
@@ -5147,6 +5231,17 @@ async def admin_open_section(cq: CallbackQuery, state: FSMContext):
     if section == "servers":
         await cq.answer("Loading server status...")
         await send_server_dashboard(cq.message.chat.id, cq.message.message_id)
+        return
+
+    if section == "health":
+        await cq.answer("Checking bot health...")
+        health = await get_live_bot_status()
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Refresh Health", callback_data="admin_open:health")],
+            [InlineKeyboardButton(text="📊 Open Analytics", callback_data="admin_open:reports")],
+            [InlineKeyboardButton(text="⬅️ Admin Panel", callback_data="admin_refresh")],
+        ])
+        await cq.message.edit_text(render_bot_health(health), parse_mode="HTML", reply_markup=kb)
         return
 
     if section == "store":
@@ -5267,6 +5362,7 @@ async def admin_open_section(cq: CallbackQuery, state: FSMContext):
                 InlineKeyboardButton(text="🏆 Top Spenders", callback_data="adm_rep:topusers:1"),
                 InlineKeyboardButton(text="💎 Live User Credits", callback_data="livecredits:0"),
             ],
+            [InlineKeyboardButton(text="🤖 Bot Health", callback_data="admin_open:health")],
             [InlineKeyboardButton(text="⬅️ Admin Panel", callback_data="admin_refresh")],
         ])
         await cq.message.edit_text(
@@ -6211,64 +6307,22 @@ async def admin_reports_action(cq: CallbackQuery):
     action = parts[1]
 
     if action == "sales":
-        await cq.answer("Generating analytics...")
-        now = datetime.utcnow()
-        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_of_week = start_of_day - timedelta(days=now.weekday())
-
-        def make_naive(dt):
-            if not dt:
-                return None
-            return dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) else dt
-
-        total_users = users_col.count_documents({})
-        users_today = users_col.count_documents({"joined_at": {"$gte": start_of_day}})
-        users_week = users_col.count_documents({"joined_at": {"$gte": start_of_week}})
-
-        all_txns = list(db["transactions"].find({"status": {"$in": ["paid", "success", "approved"]}}))
-        total_recharge = sum(float(t.get("amount", 0)) for t in all_txns)
-        today_recharge = sum(
-            float(t.get("amount", 0))
-            for t in all_txns
-            if make_naive(t.get("created_at")) and make_naive(t.get("created_at")) >= start_of_day
-        )
-        all_wds = list(db["withdrawals"].find({"status": "paid"}))
-        total_wd = sum(float(w.get("amount", 0)) for w in all_wds)
-
-        all_orders = list(orders_col.find({"status": "purchased"}))
-        total_sold = len(all_orders)
-        total_sales_inr = sum(float(o.get("price", 0)) for o in all_orders)
-        today_orders = [
-            o for o in all_orders if make_naive(o.get("created_at")) and make_naive(o.get("created_at")) >= start_of_day
-        ]
-        week_orders = [
-            o for o in all_orders if make_naive(o.get("created_at")) and make_naive(o.get("created_at")) >= start_of_week
-        ]
-        from collections import Counter
-        country_counts = Counter(o.get("country", "Unknown") for o in all_orders)
-        top_country = country_counts.most_common(1)[0][0] if country_counts else "N/A"
-
-        report = (
-            "<h2>📊 Advanced System Analytics</h2>"
-            "<blockquote>👥 <b>User Growth</b><br>"
-            f"• <b>Total Users:</b> <code>{total_users:,}</code><br>"
-            f"• <b>Joined Today:</b> <code>{users_today:,}</code><br>"
-            f"• <b>Joined This Week:</b> <code>{users_week:,}</code></blockquote>"
-            "<blockquote>💰 <b>Financial Metrics (INR)</b><br>"
-            f"• <b>Total Deposits:</b> <code>₹{total_recharge:,.2f}</code><br>"
-            f"• <b>Deposits Today:</b> <code>₹{today_recharge:,.2f}</code><br>"
-            f"• <b>Total Withdrawals:</b> <code>₹{total_wd:,.2f}</code></blockquote>"
-            "<blockquote>🛒 <b>OTP &amp; Account Sales</b><br>"
-            f"• <b>Total Sold:</b> <code>{total_sold:,}</code> (<code>₹{total_sales_inr:,.2f}</code>)<br>"
-            f"• <b>Today's Sales:</b> <code>{len(today_orders):,}</code> (<code>₹{sum(float(o.get('price', 0)) for o in today_orders):,.2f}</code>)<br>"
-            f"• <b>Weekly Sales:</b> <code>{len(week_orders):,}</code> (<code>₹{sum(float(o.get('price', 0)) for o in week_orders):,.2f}</code>)<br>"
-            f"• 🌍 <b>Top Country:</b> <code>{escape(str(top_country))}</code></blockquote>"
-        )
+        await cq.answer("Generating live analytics...")
+        try:
+            report = await build_admin_analytics_report()
+        except Exception as exc:
+            logger.exception("Interactive admin analytics failed")
+            report = (
+                "<h2>⚠️ Analytics Temporarily Unavailable</h2>"
+                f"<blockquote><code>{escape(str(exc)[:500])}</code></blockquote>"
+                "<p><i>Try again in a moment, or open Bot Health to check the runtime.</i></p>"
+            )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Refresh Analytics", callback_data="adm_rep:sales")],
+            [InlineKeyboardButton(text="🤖 Bot Health", callback_data="admin_open:health")],
             [InlineKeyboardButton(text="⬅️ Back to Reports", callback_data="admin_open:reports")],
         ])
-        await cq.message.edit_text(report, reply_markup=kb)
+        await cq.message.edit_text(report, parse_mode="HTML", reply_markup=kb)
         return
 
     if action == "topusers":
@@ -6418,8 +6472,10 @@ s3_send_countries_message = register_server3_handlers(
 )
 # ===== Bot Runner =====
 async def main():
+    global BOT_STARTED_AT, SMM_BACKGROUND_TASK
     from aiogram.types import BotCommand, BotCommandScopeChat
 
+    BOT_STARTED_AT = datetime.now(timezone.utc)
     print("TGA Store | API started.")
     await bot.set_my_commands([
         BotCommand(command="start", description="Open TGA Store | API"),
@@ -6440,8 +6496,8 @@ async def main():
         except Exception as exc:
             print(f"Could not set admin commands for {admin_id}: {exc}")
     start_auto_sweeper()  # launches the UPI/FamPay background auto-verify loop
-    asyncio.create_task(smm_background_task())  # launches SMM order auto-status-checker
-    
+    SMM_BACKGROUND_TASK = asyncio.create_task(smm_background_task(), name="smm-order-status-checker")
+
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 if __name__ == "__main__":

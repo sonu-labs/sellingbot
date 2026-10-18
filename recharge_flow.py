@@ -171,7 +171,9 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
         """Format a number without noisy trailing zeroes for Telegram text."""
         try:
             number = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            return "0"
+        if not math.isfinite(number):
             return "0"
         formatted = f"{number:.{decimals}f}".rstrip("0").rstrip(".")
         return formatted or "0"
@@ -386,8 +388,7 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
             text = (
                 "<h2>💳 Deposit &amp; Wallet Top-Up</h2>"
                 f"<blockquote>💰 <b>Available Balance:</b> <code>₹{_fmt_amount(current_bal, 2)}</code><br>"
-                f"💱 <b>Crypto Rate:</b> <code>1 USDT = ₹{USDT_TO_INR}</code> · <b>Min INR:</b> <code>₹{MIN_INR_DEPOSIT}</code><br>"
-                "⚡ <b>Processing:</b> 24/7 Instant Automated Verification</blockquote>"
+                f"💱 <b>Crypto Rate:</b> <code>1 USDT = ₹{USDT_TO_INR}</code> · <b>Min INR:</b> <code>₹{MIN_INR_DEPOSIT}</code></blockquote>"
                 "<p>👇 <i>Select your preferred payment method below:</i></p>"
             )
 
@@ -2064,7 +2065,30 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
                 "date": tx.get("settled_at") or tx.get("created_at"),
             })
 
-        combined.sort(key=lambda item: item["date"] or datetime.datetime.min, reverse=True)
+        india_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        utc_tz = datetime.timezone.utc
+
+        def history_sort_timestamp(value):
+            if not isinstance(value, datetime.datetime):
+                return float("-inf")
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=utc_tz)
+            try:
+                return value.timestamp()
+            except (OverflowError, OSError, ValueError):
+                return float("-inf")
+
+        def history_date_parts(value):
+            if isinstance(value, datetime.datetime):
+                if value.tzinfo is None:
+                    value = value.replace(tzinfo=utc_tz)
+                local_value = value.astimezone(india_tz)
+                return local_value.strftime("%d %b %Y"), local_value.strftime("%I:%M %p IST")
+            if value:
+                return str(value), "Not available"
+            return "Not available", "Not available"
+
+        combined.sort(key=lambda item: history_sort_timestamp(item.get("date")), reverse=True)
         combined = combined[:HISTORY_LIMIT]
         if not combined:
             text = (
@@ -2072,21 +2096,31 @@ def register_recharge_handlers(dp, bot, users_col, txns_col, crypto_col, setting
                 "<blockquote>📭 No completed deposits found on your account yet.</blockquote>"
             )
         else:
-            rows = []
+            blocks = []
             total_shown = 0.0
             for tx in combined:
-                date_value = tx["date"]
-                date_str = date_value.strftime("%d %b %Y, %I:%M %p") if date_value else "N/A"
-                amt = float(tx["amount"] or 0)
-                total_shown += amt
-                rows.append(
-                    f"• <b>{escape(str(tx['method']))}</b> — <code>₹{_fmt_amount(amt, 2)}</code> "
-                    f"(<i>{escape(date_str)}</i>)"
+                date_str, time_str = history_date_parts(tx.get("date"))
+                try:
+                    amount = float(tx.get("amount") or 0)
+                except (TypeError, ValueError, OverflowError):
+                    amount = 0.0
+                if not math.isfinite(amount):
+                    amount = 0.0
+                total_shown += amount
+                blocks.append(
+                    "<blockquote>"
+                    f"💳 <b>Payment Method:</b> {escape(str(tx['method']))}<br>"
+                    f"💰 <b>Amount:</b> <code>₹{_fmt_amount(amount, 2)}</code><br>"
+                    f"📅 <b>Date:</b> <code>{escape(date_str)}</code><br>"
+                    f"🕒 <b>Time:</b> <code>{escape(time_str)}</code>"
+                    "</blockquote>"
                 )
             text = (
-                f"<h2>📜 Wallet Deposit History (Last {len(combined)})</h2>"
-                f"<blockquote>{'<br>'.join(rows)}</blockquote>"
-                f"<p>💰 <i>Recent Total Shown: <b>₹{_fmt_amount(total_shown, 2)}</b></i></p>"
+                f"<h2>📜 Wallet Deposit History <i>· Latest {len(combined)}</i></h2>"
+                + "".join(blocks)
+                + "<blockquote>"
+                f"💰 <b>Recent total:</b> <code>₹{_fmt_amount(total_shown, 2)}</code>"
+                "</blockquote>"
             )
 
         await state.clear()
