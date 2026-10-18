@@ -18,14 +18,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from bson import ObjectId
-from pymongo import ReturnDocument, UpdateOne
+from pymongo import ReturnDocument
 
-from smm_catalog import (
-    detect_platform,
-    normalize_currency,
-    normalize_provider_services,
-    selling_rate_inr,
-)
+from smm_panel import normalize_currency, render_description_block
 
 logger = logging.getLogger("smm")
 
@@ -47,6 +42,7 @@ NOTIFY_BACKFILL_HOURS = 72
 PARTIAL_POLL_DAYS = 7
 STALE_POLL_DAYS = 21
 API_TIMEOUT_SECONDS = 25
+SERVICE_DESCRIPTION_LIMIT = 1500
 
 TERMINAL_NORMS = ("completed", "partial", "canceled", "failed")
 REFUND_NORMS = ("canceled", "failed")
@@ -67,13 +63,14 @@ class SMMAdmin(StatesGroup):
     waiting_panel_url = State()
     waiting_panel_key = State()
     waiting_panel_update_key = State()
-    waiting_markup = State()
     waiting_service_provider_id = State()
     waiting_service_name = State()
+    waiting_service_description = State()
     waiting_service_price = State()
     waiting_service_min = State()
     waiting_service_max = State()
     waiting_edit_price = State()
+    waiting_edit_description = State()
     waiting_admin_order_id = State()
 
 
@@ -357,25 +354,11 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             return None
         return smm_platforms.find_one({"slug": slug})
 
-    def get_import_markup() -> float:
-        cfg = get_config()
-        try:
-            value = float(cfg.get("import_markup_percent", 20.0))
-        except (TypeError, ValueError):
-            value = 20.0
-        return min(1000.0, max(0.0, value))
-
     def is_admin(uid: int) -> bool:
         return uid in admin_ids
 
     def get_config() -> dict:
-        doc = smm_settings.find_one({"_id": "config"}) or {"_id": "config"}
-        if "import_markup_percent" not in doc:
-            doc["import_markup_percent"] = 20.0
-            smm_settings.update_one(
-                {"_id": "config"}, {"$set": {"import_markup_percent": 20.0}}, upsert=True
-            )
-        return doc
+        return smm_settings.find_one({"_id": "config"}) or {"_id": "config"}
 
     def public_log_enabled() -> bool:
         return get_config().get("public_log_enabled", True)
@@ -423,103 +406,20 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             return smm_panels.find_one({})
         return smm_panels.find_one({"_id": pid}) or smm_panels.find_one({})
 
-    async def import_provider_catalog(panel: dict, mode: str) -> dict:
-        """Import compatible API v2 services into Telegram/Instagram categories."""
-        ok, payload, raw = await smm_api_call(panel, "services")
-        if not ok:
-            return {"ok": False, "error": str((payload or {}).get("error") or "Provider request failed")}
-        parsed = normalize_provider_services(payload)
-        if parsed is None:
-            return {"ok": False, "error": "The provider did not return a recognizable services list."}
-        services, invalid_count, unsupported_count = parsed
-        platform_docs = {doc["slug"]: doc for doc in supported_platforms()}
-        if not platform_docs:
-            return {"ok": False, "error": "Telegram and Instagram categories are not initialized."}
-
-        forced_slug = mode.removeprefix("all_") if mode.startswith("all_") else None
-        if forced_slug and forced_slug not in platform_docs:
-            return {"ok": False, "error": "Invalid platform selection."}
-        markup = get_import_markup()
-        currency = normalize_currency(panel.get("currency", "USD"))
-        existing_docs = list(smm_services.find({"panel_id": panel["_id"]}))
-        existing_by_id = {str(doc.get("provider_service_id")): doc for doc in existing_docs if doc.get("provider_service_id") is not None}
-        operations = []
-        new_count = 0
-        updated_count = 0
-        unmatched_count = 0
-        invalid_price_count = 0
-
-        for service in services:
-            slug = forced_slug or detect_platform(service)
-            if mode in {"telegram", "instagram"} and slug != mode:
-                unmatched_count += 1
-                continue
-            if mode == "both" and slug not in {"telegram", "instagram"}:
-                unmatched_count += 1
-                continue
-            if slug not in platform_docs:
-                unmatched_count += 1
-                continue
-
-            provider_id = service["service_id"]
-            existing = existing_by_id.get(provider_id)
-            try:
-                selling_price = selling_rate_inr(service["rate"], currency, markup)
-            except ValueError:
-                invalid_price_count += 1
-                continue
-
-            if existing:
-                stored_provider_id = existing.get("provider_service_id", provider_id)
-                updated_count += 1
-            else:
-                stored_provider_id = int(provider_id) if provider_id.isdigit() else provider_id
-                new_count += 1
-
-            fields = {
-                "platform_id": platform_docs[slug]["_id"],
-                "panel_id": panel["_id"],
-                "provider_service_id": stored_provider_id,
-                "provider_rate": service["rate"],
-                "provider_currency": currency,
-                "provider_category": service["category"],
-                "provider_type": service["type"],
-                "description": service.get("description", ""),
-                "min": service["min"],
-                "max": service["max"],
-                "catalog_imported": True,
-                "imported_at": datetime.utcnow(),
-                "import_markup_percent": markup,
-                "active": True,
-            }
-            if not existing or existing.get("catalog_imported"):
-                fields["name"] = service["name"]
-            else:
-                # Keep the admin's manually curated display name on matched rows.
-                fields["name"] = existing.get("name") or service["name"]
-            if not existing or existing.get("price_source") != "manual":
-                fields["price_per_1000"] = selling_price
-                fields["price_source"] = "import"
-            else:
-                fields["price_source"] = "manual"
-            query = {"panel_id": panel["_id"], "provider_service_id": stored_provider_id}
-            operations.append(UpdateOne(query, {"$set": fields}, upsert=True))
-            existing_by_id[provider_id] = {**(existing or {}), **fields}
-
-        for offset in range(0, len(operations), 500):
-            smm_services.bulk_write(operations[offset:offset + 500], ordered=False)
-
-        return {
-            "ok": True,
-            "new": new_count,
-            "updated": updated_count,
-            "unmatched": unmatched_count,
-            "invalid": invalid_count + invalid_price_count,
-            "unsupported": unsupported_count,
-            "margin": markup,
-            "currency": currency,
-            "catalog_count": len(services) + invalid_count + unsupported_count,
-        }
+    def read_service_description(raw) -> tuple[bool, str, str]:
+        """Validate admin-entered description text. ``-`` or /skip clears it."""
+        text = str(raw or "").strip()
+        if text in {"-", "/skip"}:
+            return True, "", ""
+        if not text:
+            return False, "", "Send the description as text, or send <b>-</b> to skip."
+        if len(text) > SERVICE_DESCRIPTION_LIMIT:
+            return (
+                False,
+                "",
+                f"Description is too long. Maximum <code>{SERVICE_DESCRIPTION_LIMIT:,}</code> characters.",
+            )
+        return True, text, ""
 
     async def send_html(chat_id, text, reply_markup=None) -> bool:
         text = clip(text)
@@ -1012,14 +912,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         await cq.answer()
 
     def provider_description_block(svc: dict) -> str:
-        description = str(svc.get("description") or "").strip()
-        name = str(svc.get("name") or "").strip()
-        if not description or description.casefold() == name.casefold():
-            return ""
-        description_lines = "<br>".join(escape(line) for line in description.splitlines())
-        if not description_lines:
-            description_lines = escape(description)
-        return f"<blockquote>📝 <b>Provider description</b><br>{description_lines}</blockquote>"
+        return render_description_block(svc.get("description"), svc.get("name"))
 
     def service_prompt(svc, balance: float, uid: int = None) -> str:
         rate_1k = get_service_rate_1k(svc, uid)
@@ -1539,21 +1432,16 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         last_run = naive_utc(cfg.get("checker_last_run"))
         checker_line = age_label(last_run) if last_run else "starting"
         stale = last_run is None or datetime.utcnow() - last_run > timedelta(minutes=5)
-        markup = get_import_markup()
         panel_count = smm_panels.count_documents({})
         service_count = smm_services.count_documents({"active": {"$ne": False}})
         kb = InlineKeyboardBuilder()
         kb.row(
             InlineKeyboardButton(text="📂 Manage Telegram / Instagram", callback_data="smma_listplat"),
-            InlineKeyboardButton(text="📦 Import Services", callback_data="smma_import"),
-        )
-        kb.row(
             InlineKeyboardButton(text="🏢 Manage Panels", callback_data="smma_listpanels"),
-            InlineKeyboardButton(text="➕ Add Nice Panel", callback_data="smma_addnicepanel"),
         )
         kb.row(
+            InlineKeyboardButton(text="➕ Add Nice Panel", callback_data="smma_addnicepanel"),
             InlineKeyboardButton(text="➕ Add Other Panel", callback_data="smma_addpanel"),
-            InlineKeyboardButton(text=f"💰 Import Markup: {markup:g}%", callback_data="smma_markup"),
         )
         kb.row(
             InlineKeyboardButton(text=f"📢 Public Log: {pub_status}", callback_data="smma_togglepublic"),
@@ -1571,19 +1459,18 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         if stale:
             warn = "<blockquote>⚠️ <i>Order monitor has not reported a cycle in 5+ minutes.</i></blockquote>"
         if panel_count == 0:
-            warn += "<blockquote>🏢 <i>No provider is saved yet. Add NiceSMMPanel or another HTTPS panel, then import its catalog.</i></blockquote>"
+            warn += "<blockquote>🏢 <i>No provider is saved yet. Add NiceSMMPanel or another HTTPS panel, then add services manually.</i></blockquote>"
         text = (
             "<h2>🚀 Social Media Services · Admin</h2>"
             + card(
                 f"🌐 <b>Ordering:</b> {svc_status}",
-                f"📦 <b>Catalog:</b> <code>{service_count:,}</code> services · <code>{panel_count}</code> providers",
-                f"💰 <b>Default import markup:</b> <code>{markup:g}%</code>",
+                f"📦 <b>Services:</b> <code>{service_count:,}</code> · <code>{panel_count}</code> providers",
                 f"🔄 <b>Order monitor:</b> <code>{h(checker_line)}</code>",
                 f"📊 <b>Last cycle checked:</b> <code>{h(cfg.get('checker_last_count', 0))}</code> orders",
                 f"📢 <b>Public log:</b> {pub_status}",
             )
             + warn
-            + "<p><i>Customer categories are fixed to Telegram and Instagram. API keys are added and updated here.</i></p>"
+            + "<p><i>Customer categories are fixed to Telegram and Instagram. Add each service manually from its category screen; API keys are added and updated here.</i></p>"
         )
         if edit:
             await edit_html(msg, text, kb.as_markup())
@@ -1625,49 +1512,6 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         )
         await cq.answer(f"Ordering {'OFF' if current else 'ON'}", show_alert=True)
         await smmadmin_menu(cq.message, edit=True)
-
-    @dp.callback_query(F.data == "smma_markup")
-    async def smma_markup(cq: CallbackQuery, state: FSMContext):
-        if not is_admin(cq.from_user.id):
-            return
-        current = get_import_markup()
-        await state.set_state(SMMAdmin.waiting_markup)
-        kb = InlineKeyboardBuilder()
-        kb.button(text="🔙 Cancel", callback_data="smma_back")
-        await edit_html(
-            cq.message,
-            "<h2>💰 Default Import Markup</h2>"
-            + card(
-                f"Current: <code>{current:g}%</code>",
-                "Enter a markup percentage from 0 to 1000. The provider's rate is converted to INR using the panel currency and the fixed $1 = ₹100 rate.",
-                "Example: <code>20</code> adds 20% over provider cost. Imported prices can still be edited per service.",
-            ),
-            kb.as_markup(),
-        )
-        await cq.answer()
-
-    @dp.message(SMMAdmin.waiting_markup)
-    async def smma_markup_save(msg: Message, state: FSMContext):
-        if not is_admin(msg.from_user.id):
-            return
-        if msg.text and msg.text.startswith("/"):
-            await state.clear()
-            raise SkipHandler()
-        try:
-            markup = float((msg.text or "").strip())
-            if not math.isfinite(markup) or not 0 <= markup <= 1000:
-                raise ValueError
-        except (TypeError, ValueError):
-            return await msg.answer("<h2>❌ Invalid Markup</h2><p>Send a number from 0 to 1000.</p>", parse_mode="HTML")
-        smm_settings.update_one({"_id": "config"}, {"$set": {"import_markup_percent": markup}}, upsert=True)
-        await state.clear()
-        kb = InlineKeyboardBuilder()
-        kb.button(text="🔙 SMM Admin", callback_data="smma_back")
-        await msg.answer(
-            f"<h2>✅ Import Markup Updated</h2><blockquote>New default: <code>{markup:g}%</code></blockquote>",
-            parse_mode="HTML",
-            reply_markup=kb.as_markup(),
-        )
 
     async def ask_panel_api_key(target, state: FSMContext, panel_name: str, api_url: str):
         await state.update_data(panel_name=panel_name, panel_url=api_url)
@@ -1788,10 +1632,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             result_title = "Added"
 
         kb = InlineKeyboardBuilder()
-        kb.row(
-            InlineKeyboardButton(text="📦 Import Catalog", callback_data=f"smma_importpanel:{panel_id}"),
-            InlineKeyboardButton(text="⚙️ Panel Settings", callback_data=f"smma_panel:{panel_id}"),
-        )
+        kb.row(InlineKeyboardButton(text="⚙️ Panel Settings", callback_data=f"smma_panel:{panel_id}"))
         kb.row(InlineKeyboardButton(text="🔙 SMM Admin", callback_data="smma_back"))
         if success:
             text = (
@@ -1801,13 +1642,13 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                     f"💰 <b>Provider balance:</b> <code>{h(resp.get('balance', '—'))} {h(resp.get('currency', panel['currency']))}</code>",
                     f"💱 <b>Rate currency:</b> <code>{h(panel['currency'])}</code>",
                 )
-                + "<p><i>Choose Import Catalog to add matching Telegram/Instagram services.</i></p>"
+                + "<p><i>Open Manage Telegram / Instagram to add each service manually.</i></p>"
             )
         else:
             text = (
                 f"<h2>⚠️ Panel {result_title}, Connection Not Verified</h2>"
                 + card(
-                    "The endpoint and key were saved, but the balance check failed. Verify the credentials in Panel Settings before importing services.",
+                    "The endpoint and key were saved, but the balance check failed. Verify the credentials in Panel Settings before adding services.",
                     f"💱 <b>Assumed rate currency:</b> <code>{h(panel['currency'])}</code>",
                 )
             )
@@ -1844,7 +1685,6 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             return await cq.answer("Panel not found.", show_alert=True)
         svc_count = smm_services.count_documents({"panel_id": panel["_id"]})
         kb = InlineKeyboardBuilder()
-        kb.row(InlineKeyboardButton(text="📦 Import Services", callback_data=f"smma_importpanel:{pid}"))
         kb.row(InlineKeyboardButton(text="🔑 Update API Key", callback_data=f"smma_setkey:{pid}"))
         kb.row(
             InlineKeyboardButton(text=f"💱 Rates in USD {' (selected)' if panel.get('currency', 'USD') != 'INR' else ''}", callback_data=f"smma_cur:{pid}:USD"),
@@ -1859,7 +1699,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             f"<h2>🏢 {h(panel['name'])}</h2>"
             + card(
                 f"🔗 <b>API endpoint:</b> <code>{h(panel.get('api_url'))}</code>",
-                f"📦 <b>Imported services:</b> <code>{svc_count:,}</code>",
+                f"📦 <b>Services:</b> <code>{svc_count:,}</code>",
                 f"💱 <b>Provider rate currency:</b> <code>{h(panel.get('currency', 'USD'))}</code>",
                 "🔐 <b>API key:</b> <i>hidden</i>",
             )
@@ -1949,7 +1789,6 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         panel = smm_panels.find_one({"_id": ObjectId(pid)})
         svc_count = smm_services.count_documents({"panel_id": panel["_id"]})
         kb = InlineKeyboardBuilder()
-        kb.row(InlineKeyboardButton(text="📦 Import Services", callback_data=f"smma_importpanel:{pid}"))
         kb.row(InlineKeyboardButton(text="🔑 Update API Key", callback_data=f"smma_setkey:{pid}"))
         kb.row(
             InlineKeyboardButton(text=f"💱 Rates in USD {' (selected)' if currency == 'USD' else ''}", callback_data=f"smma_cur:{pid}:USD"),
@@ -1962,7 +1801,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smma_listpanels"))
         text = f"<h2>🏢 {h(panel['name'])}</h2>" + card(
             f"🔗 <b>API endpoint:</b> <code>{h(panel.get('api_url'))}</code>",
-            f"📦 <b>Imported services:</b> <code>{svc_count:,}</code>",
+            f"📦 <b>Services:</b> <code>{svc_count:,}</code>",
             f"💱 <b>Provider rate currency:</b> <code>{h(panel.get('currency', currency))}</code>",
             "🔐 <b>API key:</b> <i>hidden</i>",
         )
@@ -2010,105 +1849,6 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         kb.adjust(1)
         await edit_html(cq.message, "<h2>✅ Panel Removed</h2><p>Manage another provider or return to SMM Admin.</p>", kb.as_markup())
 
-    @dp.callback_query(F.data == "smma_import")
-    async def smma_import(cq: CallbackQuery):
-        if not is_admin(cq.from_user.id):
-            return
-        panels = list(smm_panels.find({}))
-        kb = InlineKeyboardBuilder()
-        for panel in panels:
-            kb.button(text=button_label(f"📦 {panel.get('name', 'Provider')}"), callback_data=f"smma_importpanel:{panel['_id']}")
-        kb.adjust(1)
-        kb.row(InlineKeyboardButton(text="🔙 SMM Admin", callback_data="smma_back"))
-        text = (
-            "<h2>📦 Import Service Catalog</h2>"
-            + card("Select any saved HTTPS API v2 panel. Catalog imports are matched to the two customer categories: Telegram and Instagram.")
-        )
-        if not panels:
-            text += "<p>No provider panels saved yet. Add NiceSMMPanel or another provider first.</p>"
-        await edit_html(cq.message, text, kb.as_markup())
-        await cq.answer()
-
-    @dp.callback_query(F.data.startswith("smma_importpanel:"))
-    async def smma_importpanel(cq: CallbackQuery):
-        if not is_admin(cq.from_user.id):
-            return
-        pid = cq.data.split(":", 1)[1]
-        try:
-            panel = smm_panels.find_one({"_id": ObjectId(pid)})
-        except Exception:
-            panel = None
-        if not panel:
-            return await cq.answer("Panel not found.", show_alert=True)
-        kb = InlineKeyboardBuilder()
-        kb.row(
-            InlineKeyboardButton(text="✨ Auto-match both", callback_data=f"smma_imp:{pid}:both"),
-        )
-        kb.row(
-            InlineKeyboardButton(text="✈️ Telegram matches", callback_data=f"smma_imp:{pid}:telegram"),
-            InlineKeyboardButton(text="📸 Instagram matches", callback_data=f"smma_imp:{pid}:instagram"),
-        )
-        kb.row(
-            InlineKeyboardButton(text="📦 Entire catalog → Telegram", callback_data=f"smma_imp:{pid}:all_telegram"),
-            InlineKeyboardButton(text="Entire catalog → Instagram", callback_data=f"smma_imp:{pid}:all_instagram"),
-        )
-        kb.row(InlineKeyboardButton(text="🔙 Panel Settings", callback_data=f"smma_panel:{pid}"))
-        text = (
-            f"<h2>📦 Import · {h(panel.get('name'))}</h2>"
-            + card(
-                f"💰 <b>Markup:</b> <code>{get_import_markup():g}%</code> over provider rate",
-                f"💱 <b>Provider currency:</b> <code>{h(panel.get('currency', 'USD'))}</code>",
-                "Auto-match imports only catalog entries mentioning Telegram/Instagram in the name or category.",
-                "Entire-catalog modes put every compatible link-and-quantity service into the chosen category.",
-                "Special service types needing custom comments, packages, or subscriptions are skipped safely.",
-            )
-        )
-        await edit_html(cq.message, text, kb.as_markup())
-        await cq.answer()
-
-    @dp.callback_query(F.data.startswith("smma_imp:"))
-    async def smma_import_execute(cq: CallbackQuery):
-        if not is_admin(cq.from_user.id):
-            return
-        try:
-            _, pid, mode = cq.data.split(":", 2)
-            panel = smm_panels.find_one({"_id": ObjectId(pid)})
-        except Exception:
-            panel = None
-            pid = ""
-            mode = ""
-        if not panel:
-            return await cq.answer("Panel not found.", show_alert=True)
-        await cq.answer("Fetching catalog…")
-        await edit_html(
-            cq.message,
-            f"<h2>⏳ Importing from {h(panel.get('name'))}</h2>"
-            + card("Fetching the provider catalog and updating service rates. This may take a moment."),
-        )
-        result = await import_provider_catalog(panel, mode)
-        if not result.get("ok"):
-            text = "<h2>❌ Catalog Import Failed</h2>" + card(h(result.get("error", "Unknown provider error")))
-        else:
-            platform_label = "both platforms" if mode == "both" else mode.removeprefix("all_").title()
-            text = (
-                f"<h2>✅ Catalog Import Complete · {h(platform_label)}</h2>"
-                + card(
-                    f"➕ <b>New services:</b> <code>{result['new']:,}</code>",
-                    f"🔄 <b>Updated services:</b> <code>{result['updated']:,}</code>",
-                    f"💰 <b>Markup applied:</b> <code>{result['margin']:g}%</code>",
-                    f"💱 <b>Rate currency:</b> <code>{h(result['currency'])}</code>",
-                    f"↪️ <b>Unmatched for this selection:</b> <code>{result['unmatched']:,}</code>",
-                    f"⚠️ <b>Invalid rows:</b> <code>{result['invalid']:,}</code>",
-                    f"⏭️ <b>Special order types skipped:</b> <code>{result['unsupported']:,}</code>",
-                )
-                + "<p><i>Imported entries are now available in paginated Telegram/Instagram service lists.</i></p>"
-            )
-        kb = InlineKeyboardBuilder()
-        kb.row(InlineKeyboardButton(text="🔁 Import Again", callback_data=f"smma_importpanel:{pid}"))
-        kb.row(InlineKeyboardButton(text="📂 Manage Categories", callback_data="smma_listplat"))
-        kb.row(InlineKeyboardButton(text="🔙 SMM Admin", callback_data="smma_back"))
-        await edit_html(cq.message, text, kb.as_markup())
-
     @dp.callback_query(F.data == "smma_balance")
     async def smma_balance(cq: CallbackQuery):
         if not is_admin(cq.from_user.id):
@@ -2136,7 +1876,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smma_back"))
         text = (
             "<h2>📂 Telegram &amp; Instagram Categories</h2>"
-            + card("These are the only customer-facing SMM categories. Choose one to manage its catalog.")
+            + card("These are the only customer-facing SMM categories. Choose one to manage its services.")
         )
         await edit_html(cq.message, text, kb.as_markup())
         await cq.answer()
@@ -2159,10 +1899,7 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             .limit(ADMIN_SERVICES_PER_PAGE)
         )
         kb = InlineKeyboardBuilder()
-        kb.row(
-            InlineKeyboardButton(text="➕ Add Service", callback_data=f"smma_addsvc:{pid}"),
-            InlineKeyboardButton(text="📦 Import Catalog", callback_data="smma_import"),
-        )
+        kb.row(InlineKeyboardButton(text="➕ Add Service", callback_data=f"smma_addsvc:{pid}"))
         for svc in services:
             price = float(svc.get("price_per_1000", 0) or 0)
             kb.button(
@@ -2179,11 +1916,11 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             kb.row(*nav)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data="smma_listplat"))
         text = (
-            f"<h2>{h(platform.get('emoji', '📱'))} {h(platform['name'])} Catalog</h2>"
+            f"<h2>{h(platform.get('emoji', '📱'))} {h(platform['name'])} Services</h2>"
             + card(
                 f"📦 <b>Total services:</b> <code>{total_services:,}</code>",
                 f"📄 <b>Page:</b> <code>{page + 1}/{total_pages}</code>",
-                "Select a service to edit its selling rate or remove it.",
+                "Add services one at a time, or select one to edit its selling rate or remove it.",
             )
         )
         await edit_html(cq.message, text, kb.as_markup())
@@ -2271,6 +2008,29 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         if not name or len(name) > 180:
             return await msg.answer("<h2>❌ Name Required</h2><p>Send a service name up to 180 characters.</p>", parse_mode="HTML")
         await state.update_data(service_name=name)
+        await state.set_state(SMMAdmin.waiting_service_description)
+        await msg.answer(
+            "<h2>📝 Service Description</h2>"
+            + card(
+                "This text is shown to users in a blockquote on the purchase page.",
+                "Write instructions, warnings, delivery notes, or anything else you want them to read.",
+                "Line breaks are preserved. Send <b>-</b> to skip it.",
+                f"Maximum <code>{SERVICE_DESCRIPTION_LIMIT:,}</code> characters.",
+            ),
+            parse_mode="HTML",
+        )
+
+    @dp.message(SMMAdmin.waiting_service_description)
+    async def smma_svc_description(msg: Message, state: FSMContext):
+        if not is_admin(msg.from_user.id):
+            return
+        if msg.text and msg.text.startswith("/") and msg.text.strip() != "/skip":
+            await state.clear()
+            raise SkipHandler()
+        ok, description, error = read_service_description(msg.text)
+        if not ok:
+            return await msg.answer(f"<h2>❌ Invalid Description</h2><p>{error}</p>", parse_mode="HTML")
+        await state.update_data(service_description=description)
         await state.set_state(SMMAdmin.waiting_service_price)
         await msg.answer("<h2>💰 Selling Rate per 1,000</h2><blockquote><i>Send a positive INR number, for example <u>4</u> or <u>4.5</u>.</i></blockquote>", parse_mode="HTML")
 
@@ -2313,9 +2073,8 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             "panel_id": ObjectId(data["panel_id"]),
             "provider_service_id": data["provider_service_id"],
             "name": data["service_name"],
+            "description": data.get("service_description", ""),
             "price_per_1000": data["price"],
-            "price_source": "manual",
-            "catalog_imported": False,
             "min": data["min_qty"],
             "max": max_qty,
             "active": True,
@@ -2334,8 +2093,10 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
         if not svc:
             return await cq.answer("Service not found.", show_alert=True)
         panel = smm_panels.find_one({"_id": svc.get("panel_id")})
+        description_block = provider_description_block(svc)
         kb = InlineKeyboardBuilder()
         kb.button(text="✏️ Edit Price", callback_data=f"smma_editprice:{sid}")
+        kb.button(text="✏️ Edit Description", callback_data=f"smma_editdesc:{sid}")
         kb.button(text="🗑️ Remove Service", callback_data=f"smma_rmsvc:{sid}")
         kb.adjust(1)
         kb.row(InlineKeyboardButton(text="🔙 Back", callback_data=f"smma_plat:{svc['platform_id']}"))
@@ -2347,7 +2108,9 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
                 f"💰 <b>Price:</b> <code>{h(inr(svc.get('price_per_1000')))}</code> <i>/ 1,000</i>",
                 f"📉 <b>Min:</b> <code>{h(qty_fmt(svc.get('min')))}</code>",
                 f"📈 <b>Max:</b> <code>{h(qty_fmt(svc.get('max')))}</code>",
+                f"📝 <b>Description:</b> <i>{'set' if description_block else 'not set'}</i>",
             )
+            + description_block
         )
         await edit_html(cq.message, text, kb.as_markup())
         await cq.answer()
@@ -2386,12 +2149,74 @@ def register_smm_handlers(dp, bot, db, users_col, admin_ids, admin_log_id, publi
             return await msg.answer("<h2>❌ Price Must Be Positive</h2>", parse_mode="HTML")
         smm_services.update_one(
             {"_id": ObjectId(data["edit_service_id"])},
-            {"$set": {"price_per_1000": price, "price_source": "manual"}},
+            {"$set": {"price_per_1000": price}},
         )
         await state.clear()
         kb = InlineKeyboardBuilder()
         kb.row(InlineKeyboardButton(text="🔙 SMM Admin", callback_data="smma_back"))
         await msg.answer(f"<h2>✅ Price Updated</h2><blockquote>New rate: <code>{h(inr(price))}</code> / 1,000</blockquote>", parse_mode="HTML", reply_markup=kb.as_markup())
+
+    @dp.callback_query(F.data.startswith("smma_editdesc:"))
+    async def smma_editdesc(cq: CallbackQuery, state: FSMContext):
+        if not is_admin(cq.from_user.id):
+            return
+        sid = cq.data.split(":", 1)[1]
+        try:
+            svc = smm_services.find_one({"_id": ObjectId(sid)})
+        except Exception:
+            svc = None
+        if not svc:
+            return await cq.answer("Service not found.", show_alert=True)
+        await state.update_data(edit_service_id=sid)
+        await state.set_state(SMMAdmin.waiting_edit_description)
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🔙 Cancel", callback_data=f"smma_svc:{sid}")
+        current = provider_description_block(svc) or card("No description is set for this service.")
+        await edit_html(
+            cq.message,
+            "<h2>📝 Edit Service Description</h2>"
+            + current
+            + card(
+                "Send the new description as text. It is shown to users in a blockquote on the purchase page.",
+                "Instructions, warnings, and delivery notes are all allowed. Line breaks are preserved.",
+                "Send <b>-</b> to remove the description.",
+                f"Maximum <code>{SERVICE_DESCRIPTION_LIMIT:,}</code> characters.",
+            ),
+            kb.as_markup(),
+        )
+        await cq.answer()
+
+    @dp.message(SMMAdmin.waiting_edit_description)
+    async def smma_editdesc_save(msg: Message, state: FSMContext):
+        if not is_admin(msg.from_user.id):
+            return
+        if msg.text and msg.text.startswith("/") and msg.text.strip() != "/skip":
+            await state.clear()
+            raise SkipHandler()
+        ok, description, error = read_service_description(msg.text)
+        if not ok:
+            return await msg.answer(f"<h2>❌ Invalid Description</h2><p>{error}</p>", parse_mode="HTML")
+        data = await state.get_data()
+        try:
+            service_id = ObjectId(data.get("edit_service_id", ""))
+            svc = smm_services.find_one({"_id": service_id})
+        except Exception:
+            svc = None
+        if not svc:
+            await state.clear()
+            return await msg.answer("<h2>❌ Service Not Found</h2><p>Open the service again from its category.</p>", parse_mode="HTML")
+        smm_services.update_one({"_id": service_id}, {"$set": {"description": description}})
+        await state.clear()
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="🔙 Back to Service", callback_data=f"smma_svc:{service_id}"))
+        kb.row(InlineKeyboardButton(text="🔙 SMM Admin", callback_data="smma_back"))
+        preview = provider_description_block({**svc, "description": description})
+        await msg.answer(
+            "<h2>✅ Description Updated</h2>"
+            + (preview or card("Description removed. Users will not see a description block.")),
+            parse_mode="HTML",
+            reply_markup=kb.as_markup(),
+        )
 
     @dp.callback_query(F.data == "smma_allorders")
     async def smma_allorders(cq: CallbackQuery):

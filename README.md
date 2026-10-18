@@ -14,7 +14,7 @@ A production-ready Telegram marketplace bot for digital accounts, social-media s
 - Telegram and WhatsApp account marketplace, SMM reseller, product store and recharge flows
 - Admin-controlled SMM and WhatsApp visibility switches
 - SMM provider keys managed from `/smmadmin` (private-chat entry; keys are not shown in panel settings)
-- Bulk API v2 service-catalog imports, restricted to Telegram and Instagram customer categories, with configurable INR markup
+- Manual SMM service setup for the Telegram and Instagram customer categories, with INR pricing per 1,000 and minimum/maximum quantities
 - Central `/admin` control center with live analytics and bot/SMM-monitor health checks
 - API Docs entry point (coming soon)
 - MongoDB persistence, environment-sourced app credentials, and database-stored SMM provider keys
@@ -50,8 +50,8 @@ Use `/admin` for the consolidated dashboard. Existing specialist commands remain
 1. Open `/smmadmin` in a private chat.
 2. Choose **Add Nice Panel** to use `https://nicesmmpanel.com/api/v2`, or **Add Other Panel** for another HTTPS API v2 provider.
 3. Enter the provider API key in the bot chat. The key message is deleted after saving; keys are never displayed in panel settings.
-4. Set the panel's rate currency (USD or INR), choose the default markup, and use **Import Services**. Automatic import matches Telegram/Instagram entries by service name/category; an explicit full-catalog import is also available for either category.
-5. The customer catalog only exposes Telegram and Instagram. API service types requiring custom comments, subscriptions, or packages are skipped because the current order form accepts public link + quantity.
+4. Set the panel's rate currency (USD or INR). The provider currency is used only for balance checks and reference; customer prices are the INR rate entered manually for each service.
+5. Add services one at a time from **Manage Telegram / Instagram**: choose the category and provider panel, then enter the provider service ID, display name, an optional description, INR rate per 1,000, and minimum/maximum quantity. The description is shown to users in a blockquote on the purchase page and can hold instructions, warnings, or delivery notes; edit or remove it later with **Edit Description**. Telegram and Instagram are the only customer-facing SMM categories.
 
 Provider credentials are saved in the bot database and should be protected with the same care as other production secrets.
 
