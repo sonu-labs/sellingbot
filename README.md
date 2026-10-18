@@ -13,9 +13,11 @@ A production-ready Telegram marketplace bot for digital accounts, social-media s
 - User-selectable INR (`₹`) or USD (`$`) display currency
 - Telegram and WhatsApp account marketplace, SMM reseller, product store and recharge flows
 - Admin-controlled SMM and WhatsApp visibility switches
-- Central `/admin` control center
+- SMM provider keys managed from `/smmadmin` (private-chat entry; keys are not shown in panel settings)
+- Bulk API v2 service-catalog imports, restricted to Telegram and Instagram customer categories, with configurable INR markup
+- Central `/admin` control center with live analytics and bot/SMM-monitor health checks
 - API Docs entry point (coming soon)
-- MongoDB persistence and environment-only credentials
+- MongoDB persistence, environment-sourced app credentials, and database-stored SMM provider keys
 
 ## Setup
 
@@ -37,11 +39,21 @@ A production-ready Telegram marketplace bot for digital accounts, social-media s
 - `API_ID` and `API_HASH` — Telegram application credentials for Telethon flows
 - `TGLION_API_KEY`, `TGLION_ID` and `TGPVA_API_KEY` — Server 2 provider credentials (previously hard-coded in source; rotate any key that was ever committed)
 
-All API keys and credentials must stay in environment variables. Never commit a populated `.env` file.
+Keep production credentials out of source control. Existing integrations read credentials from environment variables; SMM provider keys are stored in the bot database after being entered through `/smmadmin`. Never commit a populated `.env` file.
 
 ## Admin
 
 Use `/admin` for the consolidated dashboard. Existing specialist commands remain available from its sections so all current features continue to work.
+
+### SMM provider setup
+
+1. Open `/smmadmin` in a private chat.
+2. Choose **Add Nice Panel** to use `https://nicesmmpanel.com/api/v2`, or **Add Other Panel** for another HTTPS API v2 provider.
+3. Enter the provider API key in the bot chat. The key message is deleted after saving; keys are never displayed in panel settings.
+4. Set the panel's rate currency (USD or INR), choose the default markup, and use **Import Services**. Automatic import matches Telegram/Instagram entries by service name/category; an explicit full-catalog import is also available for either category.
+5. The customer catalog only exposes Telegram and Instagram. API service types requiring custom comments, subscriptions, or packages are skipped because the current order form accepts public link + quantity.
+
+Provider credentials are saved in the bot database and should be protected with the same care as other production secrets.
 
 ## Rich-message compatibility
 

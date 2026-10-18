@@ -13,7 +13,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import rich_messages as rm  # noqa: E402
-from i18n import USD_RATE, format_balance  # noqa: E402
+from i18n import TEXT, USD_RATE, format_balance  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PY_FILES = [p for p in ROOT.glob("*.py")]
@@ -103,6 +103,26 @@ class PremiumEmojiTests(unittest.TestCase):
 
 
 class BrandingAndCommissionTests(unittest.TestCase):
+    def test_welcome_menu_hides_requested_dashboard_taglines_and_gateway_status(self):
+        for language in ("en", "ru", "ar", "zh", "id"):
+            welcome = TEXT[language]["welcome"]
+            self.assertNotIn("Instant Digital Accounts", welcome)
+            self.assertNotIn("Gateway Status", welcome)
+            self.assertNotIn("24/7", welcome)
+            self.assertNotIn("Account Overview", welcome)
+
+    def test_recharge_history_uses_per_deposit_blocks_and_no_auto_only_claim(self):
+        recharge = source("recharge_flow.py")
+        self.assertNotIn("24/7 Instant Automated Verification", recharge)
+        for field in (
+            "<b>Payment Method:</b>",
+            "<b>Amount:</b>",
+            "<b>Date:</b>",
+            "<b>Time:</b>",
+        ):
+            self.assertIn(field, recharge)
+        self.assertIn('blocks.append(\n                    "<blockquote>"', recharge)
+
     def test_official_bot_username_only(self):
         for path in PY_FILES:
             self.assertNotIn("TGAStore1Bot", path.read_text(encoding="utf-8"), path.name)

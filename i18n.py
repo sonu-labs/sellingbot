@@ -34,12 +34,9 @@ TEXT = {
         "saved": "✅ Preferences saved successfully.",
         "welcome": (
             f"<h2>{TG_EMOJI} TGA Store | API</h2>"
-            "<blockquote>👋 <b>Welcome, {name}!</b><br>"
-            "⚡ Instant Digital Accounts, Automated OTPs &amp; SMM Marketplace</blockquote>"
-            "<blockquote>👤 <b>Account Overview</b><br>"
-            "📛 <b>User ID:</b> <code>{user_id}</code><br>"
-            "💰 <b>Wallet Balance:</b> <code>{balance}</code><br>"
-            "🟢 <b>Gateway Status:</b> <code>24/7 Instant Delivery</code></blockquote>"
+            "<blockquote>👋 <b>Welcome, {name}!</b></blockquote>"
+            "<blockquote>📛 <b>User ID:</b> <code>{user_id}</code><br>"
+            "💰 <b>Wallet Balance:</b> <code>{balance}</code></blockquote>"
             "<p>✨ <i>Select a service below to get started:</i></p>"
         ),
         "buy_tg": "Buy Telegram Account",
@@ -100,12 +97,9 @@ TEXT = {
         "saved": "✅ Настройки сохранены.",
         "welcome": (
             f"<h2>{TG_EMOJI} TGA Store | API</h2>"
-            "<blockquote>👋 <b>Добро пожаловать, {name}!</b><br>"
-            "⚡ Мгновенный маркетплейс цифровых аккаунтов, OTP и SMM услуг</blockquote>"
-            "<blockquote>👤 <b>Профиль аккаунта</b><br>"
-            "📛 <b>Ваш ID:</b> <code>{user_id}</code><br>"
-            "💰 <b>Баланс:</b> <code>{balance}</code><br>"
-            "🟢 <b>Статус:</b> <code>24/7 Автовыдача</code></blockquote>"
+            "<blockquote>👋 <b>Добро пожаловать, {name}!</b></blockquote>"
+            "<blockquote>📛 <b>Ваш ID:</b> <code>{user_id}</code><br>"
+            "💰 <b>Баланс:</b> <code>{balance}</code></blockquote>"
             "<p>✨ <i>Выберите нужную услугу ниже:</i></p>"
         ),
         "buy_tg": "Купить Telegram",
@@ -162,12 +156,9 @@ TEXT = {
         "saved": "✅ تم حفظ الإعدادات.",
         "welcome": (
             f"<h2>{TG_EMOJI} TGA Store | API</h2>"
-            "<blockquote>👋 <b>مرحبًا، {name}!</b><br>"
-            "⚡ سوق فوري وآمن للحسابات الرقمية وخدمات التفعيل والتواصل</blockquote>"
-            "<blockquote>👤 <b>معلومات الحساب</b><br>"
-            "📛 <b>معرفك:</b> <code>{user_id}</code><br>"
-            "💰 <b>الرصيد:</b> <code>{balance}</code><br>"
-            "🟢 <b>الحالة:</b> <code>تسليم تلقائي 24/7</code></blockquote>"
+            "<blockquote>👋 <b>مرحبًا، {name}!</b></blockquote>"
+            "<blockquote>📛 <b>معرفك:</b> <code>{user_id}</code><br>"
+            "💰 <b>الرصيد:</b> <code>{balance}</code></blockquote>"
             "<p>✨ <i>اختر خدمة من القائمة أدناه:</i></p>"
         ),
         "buy_tg": "شراء حساب Telegram",
@@ -224,12 +215,9 @@ TEXT = {
         "saved": "✅ 设置已保存。",
         "welcome": (
             f"<h2>{TG_EMOJI} TGA Store | API</h2>"
-            "<blockquote>👋 <b>欢迎，{name}！</b><br>"
-            "⚡ 快速、安全的数字账户、自动接码与社媒服务市场</blockquote>"
-            "<blockquote>👤 <b>账户概览</b><br>"
-            "📛 <b>用户 ID：</b><code>{user_id}</code><br>"
-            "💰 <b>钱包余额：</b><code>{balance}</code><br>"
-            "🟢 <b>系统状态：</b><code>24/7 自动发货</code></blockquote>"
+            "<blockquote>👋 <b>欢迎，{name}！</b></blockquote>"
+            "<blockquote>📛 <b>用户 ID：</b><code>{user_id}</code><br>"
+            "💰 <b>钱包余额：</b><code>{balance}</code></blockquote>"
             "<p>✨ <i>请在下方选择需要的服务：</i></p>"
         ),
         "buy_tg": "购买 Telegram 账户",
@@ -286,12 +274,9 @@ TEXT = {
         "saved": "✅ Preferensi berhasil disimpan.",
         "welcome": (
             f"<h2>{TG_EMOJI} TGA Store | API</h2>"
-            "<blockquote>👋 <b>Selamat datang, {name}!</b><br>"
-            "⚡ Marketplace Akun Digital, OTP Otomatis &amp; Layanan SMM Instan</blockquote>"
-            "<blockquote>👤 <b>Ringkasan Akun</b><br>"
-            "📛 <b>ID Anda:</b> <code>{user_id}</code><br>"
-            "💰 <b>Saldo Dompet:</b> <code>{balance}</code><br>"
-            "🟢 <b>Status Sistem:</b> <code>24/7 Pengiriman Instan</code></blockquote>"
+            "<blockquote>👋 <b>Selamat datang, {name}!</b></blockquote>"
+            "<blockquote>📛 <b>ID Anda:</b> <code>{user_id}</code><br>"
+            "💰 <b>Saldo Dompet:</b> <code>{balance}</code></blockquote>"
             "<p>✨ <i>Pilih layanan di bawah untuk memulai:</i></p>"
         ),
         "buy_tg": "Beli Akun Telegram",
