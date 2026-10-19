@@ -3,8 +3,9 @@ import pathlib
 import unittest
 from unittest.mock import patch
 from otp import (
-    OPERATORS, ProviderError, TemporaClient, available_operators, catalog_items,
-    fetch_services_catalog, parse_operator_ids, pick_operator, price_options, retail_price,
+    OPERATORS, PER_PAGE, ProviderError, TemporaClient, available_operators, catalog_items,
+    fetch_services_catalog, filter_catalog, normalize_search, page_numbers, pager_buttons,
+    parse_operator_ids, pick_operator, price_options, retail_price,
 )
 
 
@@ -50,6 +51,50 @@ class CatalogTests(unittest.TestCase):
 
     def test_missing_stock_fails_closed(self):
         self.assertEqual(price_options({'22': {'tg': {'price': .02}}}, '22', 'tg'), [])
+
+
+class CatalogPresentationTests(unittest.TestCase):
+    """Pure helpers behind the storefront search box and the numbered pager."""
+
+    def test_search_filtering_and_numbered_pager_helpers(self):
+        self.assertEqual(PER_PAGE, 12)
+        # Queries are trimmed and capped before they are stored or rendered.
+        self.assertEqual(normalize_search("  Telegram  "), "Telegram")
+        self.assertEqual(normalize_search("x" * 500), "x" * 80)
+        self.assertEqual(normalize_search(None), "")
+        items = [("tg", "Telegram"), ("tss", "TemporaSMS WhatsApp"), ("22", "India")]
+        # Casefolded match on name OR code, keeping the snapshot indexes.
+        self.assertEqual(filter_catalog(items, "TELE"), [(0, "tg", "Telegram")])
+        self.assertEqual(filter_catalog(items, "tss"), [(1, "tss", "TemporaSMS WhatsApp")])
+        self.assertEqual(filter_catalog(items, "  "),
+                         [(0, "tg", "Telegram"), (1, "tss", "TemporaSMS WhatsApp"), (2, "22", "India")])
+        self.assertEqual(filter_catalog(items, "nothing-here"), [])
+        # Country lists additionally match a numeric query on the numeric code,
+        # so a typed prefix such as "+22" still finds country 22.
+        countries = [("22", "India"), ("0", "Russia"), ("7", "Indonesia")]
+        self.assertEqual([c for _i, c, _n in filter_catalog(countries, "22", numeric_codes=True)], ["22"])
+        self.assertEqual([c for _i, c, _n in filter_catalog(countries, "0", numeric_codes=True)], ["0"])
+        self.assertEqual([c for _i, c, _n in filter_catalog(countries, "2", numeric_codes=True)], ["22"])
+        self.assertEqual([c for _i, c, _n in filter_catalog(countries, "+22", numeric_codes=True)], ["22"])
+        self.assertEqual(filter_catalog(countries, "9", numeric_codes=True), [])
+        # App lists get no numeric matching: "+22" finds nothing there.
+        self.assertEqual(filter_catalog([("22", "India")], "+22"), [])
+        self.assertEqual(filter_catalog([("22", "India")], "22"), [(0, "22", "India")])
+        # Pager: current page is a noop marker, the others jump by number.
+        self.assertEqual(pager_buttons("TOK", 0, 1), [])
+        self.assertEqual(page_numbers(0, 1), [])
+        self.assertEqual(pager_buttons("TOK", 1, 3),
+                         [("1", "otp:page:TOK:0"), ("• 2 •", "noop"), ("3", "otp:page:TOK:2")])
+        # Very long catalogs are windowed, keeping the first and last page.
+        window = pager_buttons("TOK", 8, 40)
+        labels = [text for text, _data in window]
+        self.assertLess(len(labels), 40)
+        self.assertEqual(labels[0], "1")
+        self.assertEqual(labels[-1], "40")
+        self.assertIn("• 9 •", labels)
+        self.assertIn("…", labels)
+        self.assertTrue(all(data == "noop" or data.startswith("otp:page:TOK:") for _t, data in window))
+        self.assertLessEqual(max(len(data) for _t, data in window), 64)
 
 
 class OperatorParsingTests(unittest.TestCase):
@@ -228,4 +273,12 @@ class WiringTests(unittest.TestCase):
         self.assertLess(source.index('text="📲 Buy OTPs (All Apps)"'), source.index('callback_data="smm_open")])'))
 
     def test_callback_payload_with_object_id_fits_telegram(self):
-        self.assertLess(len('otp:select:' + 'a'*24 + ':9999'), 64)
+        samples = [
+            'otp:select:' + 'a' * 24 + ':9999',
+            'otp:page:' + 'a' * 24 + ':9999',
+            'otp:search:' + 'a' * 24,
+            'otp:searchclear:' + 'a' * 24,
+            'otp:alt:' + 'a' * 24 + ':10',
+        ]
+        for data in samples:
+            self.assertLessEqual(len(data.encode()), 64, data)

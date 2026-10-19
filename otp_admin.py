@@ -70,6 +70,16 @@ _PROVIDER_FAILURES = {
     "NO_BALANCE": "Provider account balance is empty (NO_BALANCE).",
     "TOO_MANY_REQUESTS": "Provider rate limit hit (TOO_MANY_REQUESTS). Wait and retry.",
     "NO_OPERATORS": "The provider returned no enabled numeric operator. Enable a matching operator or retry.",
+    # Routing rejections: a getServices code is not valid on every operator,
+    # country or line combination. The storefront answers these by probing the
+    # other enabled operators and offering only the lines with live stock.
+    "BAD_SERVICE": "That service code is not routable on this operator/country (BAD_SERVICE). "
+                   "TemporaSMS codes are operator-specific — the storefront offers the enabled "
+                   "operators that do have live stock instead of showing this code.",
+    "BAD_OPERATOR": "The provider rejected this operator (BAD_OPERATOR). getServices/getPricesV3 "
+                    "need a numeric operator the provider currently offers.",
+    "BAD_COUNTRY": "The provider rejected this country for the selected service/operator (BAD_COUNTRY).",
+    "NO_NUMBERS": "Out of stock for that service/country/operator (NO_NUMBERS).",
 }
 
 
@@ -326,6 +336,10 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
             + (f"<p>{note}</p>" if note else
                "<p>Test the key, check the provider balance, or refresh the "
                "services/countries catalog cache (normally cached for 5 minutes).</p>")
+            + "<p><i>Service codes are operator-specific: a code the provider rejects with "
+              "<code>BAD_SERVICE</code> on one line is answered in the storefront by probing the "
+              "other enabled operators and offering only the lines with live stock. Each probe's "
+              "raw response still lands in this admin log.</i></p>"
         )
         rows = [
             [btn("🧪 Test Connection / Validate Key", "otpa:test")],

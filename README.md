@@ -73,6 +73,34 @@ response and intersected with the admin-enabled operators; TemporaSMS returns
 operator payloads fail closed instead of sending an invalid request.
 Prices and stock are fetched live before a two-minute purchase confirmation.
 
+**Catalog navigation** (apps and countries) works like the Server 2 / Server 3
+lists: 12 items per page, numbered page buttons (`1`, `2`, … with `• n •`
+marking the current page as a dead button) plus ⬅️/➡️ step buttons, windowed to
+the first page, a window around the current page and the last page for very
+long catalogs. A **🔍 Search** button on both catalog screens asks for the next
+message and filters server-side on the casefolded name *or* code (country lists
+also match their numeric code, so `22` or `+22` finds India). Queries are
+capped at 80 characters, the active query is echoed as `Search: <query>` and
+survives page changes, a no-match screen offers a retry and a clear-search
+button, and the search prompt belongs to the user who tapped it — another
+user's message never continues that session.
+
+**Operator-specific service codes.** A code from `getServices` is not routable
+on every line: `getPricesV3` can answer `BAD_SERVICE` (or `BAD_OPERATOR` /
+`BAD_COUNTRY`) for a code that works elsewhere — for example WhatsApp `tss` on
+operator 9. The storefront never shows that raw token to a buyer. Instead it
+probes the remaining admin-enabled numeric operators in parallel
+(`asyncio.gather` over live `getPricesV3` calls), keeps only the lines that
+return positive stock through `price_options`, and offers them as `Operator N`
+buttons; tapping one re-prices live and shows the normal **Confirm OTP
+Purchase** quote (still `retail_price` + a `settings_version` stamp, so a
+markup or operator change invalidates it). When no other line has stock the
+buyer gets a plain message — “\<App\> is not available on Operator N for
+\<Country\>. Try another app, operator or country.” — and **no order is created
+and no wallet debit happens**. Every probe uses the shared client, so each raw
+provider body still reaches the admin log (never the API key), and
+`/otpadmin → 🛠 Provider Tools` explains these routing codes.
+
 Configure the TemporaSMS API key from **`/otpadmin`** (or **Admin → 📲 OTP
 Services → 🔑 API Key**) in a private chat: the key message is deleted, the key
 is validated with `getBalance` before saving when possible, and only a masked
