@@ -33,7 +33,7 @@ from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from bson import ObjectId
 from bson.errors import InvalidId
 
@@ -96,6 +96,33 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
 
     def eff():
         return cfg.effective_settings(settings_col, env_api_key, env_markup, rate)
+
+    async def log_provider_response(action, params, raw, status):
+        """Forward the exact provider body to the configured admin log.
+
+        API credentials are never part of ``params``. Large catalogs/status
+        payloads are attached as a UTF-8 text file to avoid Telegram message
+        length truncation, preserving the complete unmodified response.
+        """
+        if not admin_log_id:
+            return
+        safe_params = {k: v for k, v in params.items() if k.lower() not in {"api_key", "key", "token"}}
+        metadata = (
+            "📡 <b>TemporaSMS API</b>\n"
+            f"Action: <code>{escape(str(action))}</code> · HTTP <code>{int(status)}</code>\n"
+            f"Params: <code>{escape(str(safe_params)[:700])}</code>\n"
+        )
+        body = str(raw)
+        if len(body) <= 2800:
+            await bot.send_message(admin_log_id, metadata + "Raw response:\n<code>" + escape(body or "(empty)") + "</code>")
+            return
+        filename = f"temporasms_{str(action)[:40]}.txt"
+        document = BufferedInputFile(body.encode("utf-8"), filename=filename)
+        await bot.send_document(admin_log_id, document, caption=metadata + "Raw response attached in full.")
+
+    setter = getattr(api, "set_response_logger", None)
+    if setter:
+        setter(log_provider_response)
 
     def settings():
         return cfg.get_settings(settings_col)
@@ -832,7 +859,11 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
         admin_id = message.from_user.id
         validated, balance = False, None
         try:
-            balance = await TemporaClient(candidate).get_balance()
+            validation_client = TemporaClient(candidate)
+            validation_logger = getattr(validation_client, "set_response_logger", None)
+            if validation_logger:
+                validation_logger(log_provider_response)
+            balance = await validation_client.get_balance()
             validated = True
         except ProviderError as exc:
             if exc.code in ("BAD_KEY", "USER_BANNED"):

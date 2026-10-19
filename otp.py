@@ -20,7 +20,13 @@ OPERATORS = ("1", "2", "3", "4", "7", "8", "9", "10")
 POPULAR = ("telegram", "instagram", "facebook", "whatsapp", "google", "tiktok")
 log = logging.getLogger(__name__)
 
-PROVIDER_ERROR_CODES = {"BAD_KEY", "USER_BANNED", "ERROR", "BAD_ACTION", "BAD_SERVICE", "BAD_COUNTRY", "BAD_OPERATOR", "NO_BALANCE", "NO_NUMBERS", "TOO_MANY_REQUESTS", "UNDER_DEVELOPMENT", "WRONG_MAX_PRICE", "BAD_PRICE"}
+PROVIDER_ERROR_CODES = {
+    "BAD_KEY", "USER_BANNED", "ERROR", "BAD_ACTION", "BAD_SERVICE", "BAD_COUNTRY",
+    "BAD_OPERATOR", "BAD_TYPE", "BAD_STATUS", "BAD_MAX_PRICE", "WRONG_MAX_PRICE",
+    "NO_BALANCE", "NO_NUMBERS", "NO_ACTIVATION", "SERVICE_BANNED",
+    "EARLY_CANCEL_DENIED", "TOO_MANY_REQUESTS", "UNDER_DEVELOPMENT", "BAD_PRICE",
+}
+
 
 
 class ProviderError(Exception):
@@ -53,9 +59,28 @@ class TemporaClient:
     callable returning the current key, which is how admin-panel key changes
     apply at runtime without a restart."""
 
-    def __init__(self, key):
+    def __init__(self, key, response_logger=None):
         self._key_source = key
         self.cache = {}
+        self.response_logger = response_logger
+
+    def set_response_logger(self, callback):
+        """Set an optional async observer for raw provider responses.
+
+        The API key is deliberately never included in observer arguments.
+        """
+        self.response_logger = callback
+
+    async def _observe(self, action, params, raw, status):
+        if self.response_logger is None:
+            return
+        try:
+            result = self.response_logger(action, params, raw, status)
+            if hasattr(result, "__await__"):
+                await result
+        except Exception:
+            # Diagnostics must never break provider operations.
+            log.warning("OTP provider response logging failed")
 
     @property
     def key(self):
@@ -73,21 +98,38 @@ class TemporaClient:
         key = self.key
         if not key:
             raise ProviderError("OTP service is not configured yet. Please contact support.", code="NOT_CONFIGURED")
+        request_params = {"api_key": key, "action": action,
+                          **{k: str(v) for k, v in params.items() if v is not None}}
         try:
+            # TemporaSMS documents handler_api.php as a GET endpoint. Using
+            # query parameters (rather than POST form data) is required by
+            # their gateway and matches the published examples.
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as session:
-                async with session.post(BASE_URL, data={"api_key": key, "action": action, **{k: str(v) for k, v in params.items()}}) as response:
-                    response.raise_for_status()
+                async with session.get(BASE_URL, params=request_params) as response:
                     raw = (await response.text()).strip()
+                    status = response.status
         except (aiohttp.ClientError, asyncio.TimeoutError):
             # Never log request URLs, exceptions or secrets.
             raise ProviderError("Provider connection interrupted. Please check My OTP Orders before retrying.", code="CONNECTION") from None
+        safe_params = {k: str(v) for k, v in params.items() if v is not None}
+        await self._observe(action, safe_params, raw, status)
         try:
             data = json.loads(raw)
-        except ValueError:
+        except (ValueError, TypeError):
             data = raw
-        if isinstance(data, str) and data in PROVIDER_ERROR_CODES:
-            messages = {"NO_NUMBERS": "Out of stock. Try another country or operator.", "TOO_MANY_REQUESTS": "Provider is busy. Please wait before retrying."}
-            raise ProviderError(messages.get(data, "Provider unavailable for this selection. Please try later or contact support."), code=data)
+        error_code = data if isinstance(data, str) else (
+            data.get("error") or data.get("code") if isinstance(data, dict) else None
+        )
+        if isinstance(error_code, str) and error_code in PROVIDER_ERROR_CODES:
+            messages = {
+                "NO_NUMBERS": "Out of stock. Try another country or operator.",
+                "TOO_MANY_REQUESTS": "Provider is busy. Please wait before retrying.",
+                "NO_BALANCE": "Provider account has insufficient balance.",
+                "BAD_KEY": "Provider rejected the API key. Check that the active key is correct.",
+            }
+            raise ProviderError(messages.get(error_code, "Provider unavailable for this selection. Please try later or contact support."), code=error_code)
+        if status < 200 or status >= 300:
+            raise ProviderError("Provider returned an HTTP error. Check the raw response in the admin log.", code="HTTP_ERROR")
         return data
 
     async def get_balance(self):
@@ -122,28 +164,60 @@ def catalog_items(data, kind):
 
 
 def price_options(data, country, service):
+    """Normalize TemporaSMS V1/V2/V3 live-price response shapes.
+
+    V3 provider options can expose ``price`` as a list and the routable
+    public ID as ``providerIds``; older responses use price-keyed stock maps.
+    Prefer provider-specific V3 options so purchases can pass providerIds.
+    """
     node = data.get(str(country), {}).get(str(service), {}) if isinstance(data, dict) else {}
-    options = []
-    def visit(value, provider=None):
-        if not isinstance(value, dict):
-            return
-        cost = value.get("price", value.get("cost"))
-        count = value.get("count", value.get("stock", 0))
+    if not isinstance(node, dict):
+        return []
+
+    def build(cost, count, provider=None):
         try:
             cost, count = float(cost), int(count)
             if math.isfinite(cost) and cost > 0 and count > 0:
-                options.append({"cost": cost, "stock": count, "provider": provider})
-        except (ValueError, TypeError):
+                return {"cost": cost, "stock": count, "provider": provider}
+        except (ValueError, TypeError, OverflowError):
             pass
-        for key, child in value.items():
-            if isinstance(child, dict):
-                if key == "providers":
-                    for pid, option in child.items():
-                        visit(option, str(pid))
-                else:
-                    visit(child, str(key) if str(key).isdigit() and provider is None else provider)
-    visit(node)
-    return sorted(options, key=lambda x: x["cost"])
+        return None
+
+    options = []
+    providers = node.get("providers")
+    if isinstance(providers, dict):
+        for provider_key, entry in providers.items():
+            if not isinstance(entry, dict):
+                continue
+            ids = entry.get("providerIds") or provider_key
+            provider_ids = ",".join(str(x) for x in ids) if isinstance(ids, (list, tuple)) else str(ids)
+            prices = entry.get("price", entry.get("cost"))
+            if not isinstance(prices, (list, tuple)):
+                prices = [prices]
+            for cost in prices:
+                option = build(cost, entry.get("count", entry.get("stock", 0)), provider_ids)
+                if option:
+                    options.append(option)
+        if options:
+            return sorted(options, key=lambda item: item["cost"])
+
+    # V3 without provider breakdown, and V2 object entries.
+    cost = node.get("price", node.get("cost"))
+    prices = cost if isinstance(cost, (list, tuple)) else [cost]
+    for value in prices:
+        option = build(value, node.get("count", node.get("stock", 0)))
+        if option:
+            options.append(option)
+
+    # Legacy getPrices/getPricesV2 shape: {"2.99": "467"}.
+    if not options:
+        for price, stock in node.items():
+            if price == "providers":
+                continue
+            option = build(price, stock)
+            if option:
+                options.append(option)
+    return sorted(options, key=lambda item: item["cost"])
 
 
 def retail_price(cost, rate, markup):
@@ -227,7 +301,7 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
             credit(order)
         elif cancel:
             result = await api.call("setStatus", id=order["activation_id"], status=8)
-            if result in ("ACCESS_CANCEL", "STATUS_CANCEL"):
+            if result in ("ACCESS_CANCEL", "ACCESS_CANCEL_ALREADY", "STATUS_CANCEL"):
                 orders.update_one({"_id": order["_id"]}, {"$set": {"status": "refunding", "updated_at": datetime.utcnow()}})
                 credit(order)
             else:
@@ -369,9 +443,25 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
             if doc["kind"] == "services":
                 if code in otp_cfg.hidden_codes(eff["raw"]):
                     raise ProviderError("This app is currently unavailable. Please choose another app.")
-                ops = eff["operators"]
+                # The provider's live operator list is authoritative; runtime
+                # admin toggles further restrict what the storefront offers.
+                operators_data = await api.catalog("getOperators")
+                if isinstance(operators_data, dict):
+                    provider_ops = set()
+                    for label, value in operators_data.items():
+                        # Published shape is {"Operator 1": "1"}; tolerate
+                        # numeric-ID keyed maps as well.
+                        if str(value).isdigit():
+                            provider_ops.add(str(value))
+                        elif str(label).isdigit():
+                            provider_ops.add(str(label))
+                elif isinstance(operators_data, list):
+                    provider_ops = {str(value) for value in operators_data if str(value).isdigit()}
+                else:
+                    provider_ops = set()
+                ops = tuple(op for op in eff["operators"] if op in provider_ops)
                 if not ops:
-                    raise ProviderError("No operators are currently available. Please try later.")
+                    raise ProviderError("No supported operators are currently available. Refresh the provider catalog or try later.")
                 token = view(uid, service=code, service_name=name)
                 return await show(cq, f"<b>{escape(name)} · Select Operator</b>\nLive country availability and stock depend on the selected operator.", [[button(f"Operator {op}", f"otp:operator:{token}:{op}")] for op in ops] + [[button("⬅️ Apps", "otp:open")]])
             ctx = {**doc["context"], "country": code, "country_name": name}

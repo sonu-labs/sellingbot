@@ -1,6 +1,7 @@
 """Offline coverage for provider response parsing and storefront invariants."""
 import pathlib
 import unittest
+from unittest.mock import patch
 from otp import catalog_items, price_options, retail_price, OPERATORS, TemporaClient, ProviderError
 
 
@@ -28,6 +29,19 @@ class CatalogTests(unittest.TestCase):
     def test_direct_price_shape(self):
         self.assertEqual(price_options({'22': {'tg': {'price': .02, 'count': 10}}}, '22', 'tg')[0]['cost'], .02)
 
+    def test_v3_provider_price_list_and_public_provider_ids(self):
+        data = {'22': {'wa': {'price': 2.99, 'count': 467, 'providers': {
+            '3': {'count': 467, 'price': [2.99], 'providerIds': '12,15'},
+        }}}}
+        self.assertEqual(price_options(data, '22', 'wa'), [
+            {'cost': 2.99, 'stock': 467, 'provider': '12,15'},
+        ])
+
+    def test_legacy_price_map(self):
+        self.assertEqual(price_options({'22': {'wa': {'2.99': '467'}}}, '22', 'wa'), [
+            {'cost': 2.99, 'stock': 467, 'provider': None},
+        ])
+
     def test_wallet_price_rounds_up(self):
         self.assertEqual(retail_price(.02101, 100, 10), 2.32)
 
@@ -39,6 +53,57 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_unconfigured_client_never_calls_network(self):
         with self.assertRaises(ProviderError):
             await TemporaClient('').call('getServices')
+
+    async def test_uses_documented_get_and_logs_exact_raw_response_without_key(self):
+        calls, observed = [], []
+
+        class Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def text(self):
+                return "ACCESS_BALANCE:100.1234"
+
+        class Session:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def get(self, url, params):
+                calls.append((url, params))
+                return Response()
+
+        async def observer(action, params, raw, status):
+            observed.append((action, params, raw, status))
+
+        with patch("otp.aiohttp.ClientSession", Session):
+            result = await TemporaClient("secret-key", observer).call("getBalance")
+
+        self.assertEqual(result, "ACCESS_BALANCE:100.1234")
+        self.assertEqual(calls[0][1], {"api_key": "secret-key", "action": "getBalance"})
+        self.assertEqual(observed, [("getBalance", {}, "ACCESS_BALANCE:100.1234", 200)])
+        self.assertNotIn("secret-key", repr(observed))
+
+    async def test_provider_error_tokens_are_preserved(self):
+        client = TemporaClient("key")
+
+        async def fake_call(action, **params):
+            raise ProviderError("bad selection", code="BAD_TYPE")
+
+        client.call = fake_call
+        with self.assertRaises(ProviderError) as ctx:
+            await client.call("getNumber")
+        self.assertEqual(ctx.exception.code, "BAD_TYPE")
 
 
 class WiringTests(unittest.TestCase):
