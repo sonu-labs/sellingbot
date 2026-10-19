@@ -37,6 +37,7 @@ from aiogram.types import InputMediaVideo
 from admin_analytics import summarize_analytics, utc_naive
 from recharge_flow import register_recharge_handlers
 from otp import register_otp_handlers
+from otp_admin import register_otp_admin_handlers
 from smm import register_smm_handlers
 from server3 import register_server3_handlers
 from mustjoin import (
@@ -5112,6 +5113,7 @@ def admin_panel_markup() -> InlineKeyboardMarkup:
             premium_button(text="🖥 Server Control", callback_data="admin_open:servers"),
             premium_button(text="💳 Payments", callback_data="ps:home"),
         ],
+        [premium_button(text="📲 OTP Services", callback_data="otpa:home")],
         [
             premium_button(text="🏪 Store Control", callback_data="admin_open:store"),
             premium_button(text="🌐 SMM Control", callback_data="smm_adm_back"),
@@ -6472,10 +6474,19 @@ s3_send_countries_message = register_server3_handlers(
     SALES=SALES, TEMPORASMS_API_KEY=TEMPORASMS_API_KEY,
     BOTUSER=BOTUSER, CHANNEL=CHANNEL
 )
+OTP_ENV_MARKUP = float(os.getenv("OTP_MARKUP_PERCENT", "0"))
+otp_ctx = {}
 otp_background_task = register_otp_handlers(
     dp=dp, bot=bot, db=db, users_col=users_col,
     api_key=TEMPORASMS_API_KEY, rate=USD_TO_INR,
-    markup=float(os.getenv("OTP_MARKUP_PERCENT", "0")),
+    markup=OTP_ENV_MARKUP,
+    settings_col=settings_col, registry=otp_ctx,
+)
+register_otp_admin_handlers(
+    dp=dp, bot=bot, db=db, users_col=users_col, settings_col=settings_col,
+    admin_ids=ADMIN_IDS, env_api_key=TEMPORASMS_API_KEY,
+    env_markup=OTP_ENV_MARKUP, rate=USD_TO_INR, otp_ctx=otp_ctx,
+    admin_log_id=ADMINLOG,
 )
 # ===== Bot Runner =====
 async def main():
@@ -6496,6 +6507,7 @@ async def main():
                 BotCommand(command="balance", description="View wallet balance"),
                 BotCommand(command="manageserver", description="Manage API servers"),
                 BotCommand(command="paymentsettings", description="Manage payments"),
+                BotCommand(command="otpadmin", description="Manage OTP services (TemporaSMS)"),
                 BotCommand(command="smmadmin", description="Manage SMM services"),
                 BotCommand(command="managestore", description="Manage store"),
                 BotCommand(command="broadcast", description="Broadcast replied message"),
