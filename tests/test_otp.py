@@ -2,7 +2,10 @@
 import pathlib
 import unittest
 from unittest.mock import patch
-from otp import catalog_items, price_options, retail_price, OPERATORS, TemporaClient, ProviderError
+from otp import (
+    OPERATORS, ProviderError, TemporaClient, available_operators, catalog_items,
+    fetch_services_catalog, parse_operator_ids, pick_operator, price_options, retail_price,
+)
 
 
 class CatalogTests(unittest.TestCase):
@@ -49,6 +52,79 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(price_options({'22': {'tg': {'price': .02}}}, '22', 'tg'), [])
 
 
+class OperatorParsingTests(unittest.TestCase):
+    def test_documented_label_to_id_map(self):
+        self.assertEqual(parse_operator_ids({"Operator 1": "1", "Operator 2": "2"}), ("1", "2"))
+
+    def test_id_to_label_map_and_mixed_numeric_types(self):
+        self.assertEqual(
+            parse_operator_ids({"2": "Operator 2", "1": "Operator 1", "7": 7, "10": 10.0}),
+            ("1", "2", "7", "10"),
+        )
+
+    def test_envelopes_and_object_values(self):
+        payload = {"status": "ok", "data": {"operators": {
+            "1": {"name": "Operator 1"}, "Operator 4": {"id": 4}, "5": {"code": "5"},
+        }}}
+        self.assertEqual(parse_operator_ids(payload), ("1", "4", "5"))
+
+    def test_lists_of_ids_labels_and_objects(self):
+        payload = [1, "2", "Operator 3", {"id": "4"}, {"operator": 7}, {"name": "Line 9"}]
+        self.assertEqual(parse_operator_ids(payload), ("1", "2", "3", "4", "7", "9"))
+
+    def test_json_encoded_and_delimited_strings(self):
+        self.assertEqual(parse_operator_ids('{"Operator 1": "1"}'), ("1",))
+        self.assertEqual(parse_operator_ids("[1, 2, 7]"), ("1", "2", "7"))
+        self.assertEqual(parse_operator_ids("1,2; 7|10"), ("1", "2", "7", "10"))
+
+    def test_provider_errors_and_non_numeric_values_fail_closed(self):
+        for payload in ("BAD_OPERATOR", {"error": "BAD_OPERATOR"}, {}, [], None, True,
+                        float("nan"), [0, -1, "x"], {"Operator X": "x"}):
+            self.assertEqual(parse_operator_ids(payload), (), payload)
+
+    def test_only_enabled_live_operators_are_available_in_admin_order(self):
+        data = {"Operator 10": 10, "Operator 2": "2", "2": "Operator 3", "Operator 99": "99"}
+        self.assertEqual(available_operators(data, ("1", "2", "10")), ("2", "10"))
+        self.assertEqual(pick_operator(data, ("1", "10")), "10")
+        with self.assertRaises(ProviderError) as ctx:
+            pick_operator(data, ("1", "4"))
+        self.assertEqual(ctx.exception.code, "NO_OPERATORS")
+
+
+class ServicesCatalogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_services_are_fetched_with_live_enabled_numeric_operator(self):
+        calls = []
+
+        class FakeAPI:
+            async def catalog(self, action, **params):
+                calls.append((action, params))
+                if action == "getOperators":
+                    return {"Operator 3": "3", "Operator 10": "10"}
+                if action == "getServices":
+                    return {"tg": "Telegram"}
+                raise AssertionError(action)
+
+        items, operator = await fetch_services_catalog(FakeAPI(), ("1", "10"))
+        self.assertEqual(operator, "10")
+        self.assertEqual(items, [("tg", "Telegram")])
+        self.assertEqual(calls, [("getOperators", {}), ("getServices", {"operator": "10"})])
+
+    async def test_services_are_never_requested_without_a_usable_operator(self):
+        actions = []
+
+        class FakeAPI:
+            async def catalog(self, action, **params):
+                actions.append(action)
+                if action == "getOperators":
+                    return "BAD_OPERATOR"
+                raise AssertionError("getServices must not run without an operator")
+
+        with self.assertRaises(ProviderError) as ctx:
+            await fetch_services_catalog(FakeAPI(), ("1", "2"))
+        self.assertEqual(ctx.exception.code, "NO_OPERATORS")
+        self.assertEqual(actions, ["getOperators"])
+
+
 class ClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_unconfigured_client_never_calls_network(self):
         with self.assertRaises(ProviderError):
@@ -92,6 +168,46 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "ACCESS_BALANCE:100.1234")
         self.assertEqual(calls[0][1], {"api_key": "secret-key", "action": "getBalance"})
         self.assertEqual(observed, [("getBalance", {}, "ACCESS_BALANCE:100.1234", 200)])
+        self.assertNotIn("secret-key", repr(observed))
+
+    async def test_get_services_logs_operator_and_raw_body_but_not_the_key(self):
+        calls, observed = [], []
+
+        class Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def text(self):
+                return '{"tg": "Telegram"}'
+
+        class Session:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def get(self, url, params):
+                calls.append((url, params))
+                return Response()
+
+        async def observer(action, params, raw, status):
+            observed.append((action, params, raw, status))
+
+        with patch("otp.aiohttp.ClientSession", Session):
+            result = await TemporaClient("secret-key", observer).call("getServices", operator="1")
+
+        self.assertEqual(result, {"tg": "Telegram"})
+        self.assertEqual(calls[0][1], {"api_key": "secret-key", "action": "getServices", "operator": "1"})
+        self.assertEqual(observed, [("getServices", {"operator": "1"}, '{"tg": "Telegram"}', 200)])
         self.assertNotIn("secret-key", repr(observed))
 
     async def test_provider_error_tokens_are_preserved(self):

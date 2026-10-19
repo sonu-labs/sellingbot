@@ -66,6 +66,11 @@ The main menu now includes **Buy OTPs (All Apps)** above Social Media Services.
 It loads services and operator-specific countries from TemporaSMS (five-minute
 catalog cache), promotes Telegram/Instagram/Facebook/WhatsApp/Google/TikTok,
 and paginates the complete catalog. Operators are 1, 2, 3, 4, 7, 8, 9 and 10.
+Every `getServices` call (storefront, admin catalog refresh and the popular-app
+picker) passes a numeric operator resolved from the live `getOperators`
+response and intersected with the admin-enabled operators; TemporaSMS returns
+`BAD_OPERATOR` when that parameter is missing. Non-numeric or unavailable
+operator payloads fail closed instead of sending an invalid request.
 Prices and stock are fetched live before a two-minute purchase confirmation.
 
 Configure the TemporaSMS API key from **`/otpadmin`** (or **Admin → 📲 OTP
