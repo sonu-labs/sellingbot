@@ -38,7 +38,7 @@ from bson import ObjectId
 from bson.errors import InvalidId
 
 import otp_settings as cfg
-from otp import ProviderError, TemporaClient, catalog_items
+from otp import ProviderError, TemporaClient, catalog_items, fetch_services_catalog
 from rich_messages import premium_button, safe_edit_or_send
 
 log = logging.getLogger(__name__)
@@ -69,6 +69,7 @@ _PROVIDER_FAILURES = {
     "BAD_RESPONSE": "Provider returned an unexpected response.",
     "NO_BALANCE": "Provider account balance is empty (NO_BALANCE).",
     "TOO_MANY_REQUESTS": "Provider rate limit hit (TOO_MANY_REQUESTS). Wait and retry.",
+    "NO_OPERATORS": "The provider returned no enabled numeric operator. Enable a matching operator or retry.",
 }
 
 
@@ -631,8 +632,9 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
                 f"💰 <b>Provider balance:</b> <code>{balance:g}</code> (provider account currency)"))
         if action == "refreshcat":
             api.clear_cache()
-            services = catalog_items(await api.catalog("getServices"), "services")
-            operator = (eff()["operators"] or ("1",))[0]
+            # getServices rejects requests without a live numeric operator,
+            # so resolve it from the freshly fetched getOperators reply.
+            services, operator = await fetch_services_catalog(api, eff()["operators"])
             countries = catalog_items(await api.catalog("getCountries", operator=operator), "countries")
             await audit(admin_id, "catalog_refreshed", services=len(services), countries=len(countries))
             return await render_tools(msg, note=(
@@ -736,7 +738,8 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
                 await audit(admin_id, "app_visibility", code=entry["code"], hidden=False)
             return await render_hidden(msg)
         if action == "popadd":
-            items = catalog_items(await api.catalog("getServices"), "services")
+            # The app picker uses the exact same operator-aware catalog call.
+            items, _operator = await fetch_services_catalog(api, eff()["operators"])
             if not items:
                 raise ProviderError("No catalog available from provider. Please try later.")
             token = str(aviews.insert_one({"kind": "picker", "admin_id": admin_id,

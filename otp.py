@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_UP
@@ -161,6 +162,174 @@ def catalog_items(data, kind):
         if isinstance(name, str) and str(code) and name:
             result.append((str(code), name))
     return sorted(result, key=lambda item: item[1].casefold())
+
+
+_OPERATOR_ENVELOPES = ("operators", "data", "result", "response", "items")
+_OPERATOR_ID_FIELDS = ("id", "operator", "operator_id", "operatorId", "code", "value")
+_OPERATOR_LABEL = re.compile(r"^(?:operator|op|line)?[\s:_#-]*(\d{1,6})$", re.IGNORECASE)
+
+
+def _operator_id(value, *, allow_label=False):
+    """Return a normalized numeric operator ID string, or ``None``.
+
+    Non-numeric values, booleans, zero/negative numbers and malformed
+    floating-point values are rejected so a provider error token can never
+    be mistaken for a routable operator.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        number = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            number = int(text)
+        elif allow_label:
+            match = _OPERATOR_LABEL.fullmatch(text)
+            if not match:
+                return None
+            number = int(match.group(1))
+        else:
+            return None
+    else:
+        return None
+    return str(number) if 1 <= number <= 999999 else None
+
+
+def parse_operator_ids(data, _depth=0):
+    """Extract numeric operator IDs from any live ``getOperators`` payload.
+
+    TemporaSMS (and compatible gateways) may answer with any of these shapes:
+
+    * label -> ID maps: ``{"Operator 1": "1"}``
+    * ID -> label maps: ``{"1": "Operator 1"}``
+    * ID/label maps with object values: ``{"1": {"name": "..."}}``
+    * envelopes: ``{"operators": ...}``/``{"data": ...}``/``{"result": ...}``
+    * lists of IDs, labels ("Operator 1") or ``{"id": ...}`` objects
+    * JSON-encoded versions of all of the above
+
+    Only positive numeric IDs are returned (sorted numerically). Anything
+    else — including provider errors such as ``BAD_OPERATOR`` — yields an
+    empty tuple so callers fail closed instead of sending a bad operator.
+    """
+    if _depth > 5:
+        return ()
+    if isinstance(data, (bytes, bytearray)):
+        try:
+            data = bytes(data).decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            return ()
+    if isinstance(data, str):
+        text = data.strip()
+        if not text:
+            return ()
+        if text[0] in "[{":
+            try:
+                return parse_operator_ids(json.loads(text), _depth + 1)
+            except (TypeError, ValueError):
+                return ()
+        # A few deployments return a bare comma/semicolon/pipe separated list.
+        ids = set()
+        for token in re.split(r"[,;|]", text):
+            operator = _operator_id(token, allow_label=True)
+            if operator:
+                ids.add(operator)
+        return tuple(sorted(ids, key=int))
+    if isinstance(data, dict):
+        for envelope in _OPERATOR_ENVELOPES:
+            if envelope in data:
+                nested = parse_operator_ids(data[envelope], _depth + 1)
+                if nested:
+                    return nested
+        ids = set()
+        for key, value in data.items():
+            key_id = _operator_id(key)
+            if key_id:
+                ids.add(key_id)
+            if isinstance(value, dict):
+                for field in _OPERATOR_ID_FIELDS:
+                    if field in value:
+                        field_id = _operator_id(value[field])
+                        if field_id:
+                            ids.add(field_id)
+                        break
+                else:
+                    ids.update(parse_operator_ids(value, _depth + 1))
+                    label_id = _operator_id(key, allow_label=True)
+                    if label_id:
+                        ids.add(label_id)
+            elif isinstance(value, (list, tuple, set)):
+                ids.update(parse_operator_ids(value, _depth + 1))
+            else:
+                value_id = _operator_id(value)
+                if value_id:
+                    ids.add(value_id)
+        return tuple(sorted(ids, key=int))
+    if isinstance(data, (list, tuple, set)):
+        ids = set()
+        for entry in data:
+            if isinstance(entry, dict):
+                field_id = None
+                for field in _OPERATOR_ID_FIELDS:
+                    if field in entry:
+                        field_id = _operator_id(entry[field])
+                        break
+                if field_id:
+                    ids.add(field_id)
+                else:
+                    ids.update(parse_operator_ids(entry, _depth + 1))
+                    label_id = _operator_id(entry.get("name"), allow_label=True)
+                    if label_id:
+                        ids.add(label_id)
+            elif isinstance(entry, (list, tuple, set)):
+                ids.update(parse_operator_ids(entry, _depth + 1))
+            else:
+                entry_id = _operator_id(entry, allow_label=True)
+                if entry_id:
+                    ids.add(entry_id)
+        return tuple(sorted(ids, key=int))
+    return ()
+
+
+def available_operators(data, enabled_operators):
+    """Live numeric provider operators intersected with admin-enabled ones."""
+    live = set(parse_operator_ids(data))
+    available = []
+    for raw in enabled_operators or ():
+        operator = _operator_id(raw)
+        if operator and operator in live and operator not in available:
+            available.append(operator)
+    return tuple(available)
+
+
+def pick_operator(data, enabled_operators):
+    """Pick the first admin-enabled operator present in a live reply."""
+    operators = available_operators(data, enabled_operators)
+    if not operators:
+        raise ProviderError(
+            "No enabled numeric operator is currently offered by the provider. "
+            "Please retry later or ask the admin to enable an available operator.",
+            code="NO_OPERATORS",
+        )
+    return operators[0]
+
+
+async def fetch_services_catalog(api, enabled_operators):
+    """Load services using an operator from the live ``getOperators`` reply.
+
+    TemporaSMS answers ``BAD_OPERATOR`` to ``getServices`` without a numeric
+    operator, so every storefront/admin catalog load goes through this helper.
+    Returns ``(catalog_items, operator)``.
+    """
+    operator = pick_operator(await api.catalog("getOperators"), enabled_operators)
+    items = catalog_items(await api.catalog("getServices", operator=operator), "services")
+    return items, operator
 
 
 def price_options(data, country, service):
@@ -365,10 +534,13 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
         uid = cq.from_user.id
         context = context or {}
         if kind == "services":
-            items = catalog_items(await api.catalog("getServices"), "services")
+            eff = current()
+            # TemporaSMS requires a numeric operator on getServices; it is
+            # resolved from the live getOperators reply and admin toggles.
+            items, _operator = await fetch_services_catalog(api, eff["operators"])
             # Admin popular ordering / hidden apps (falls back to the
             # historic built-in ordering when nothing is configured).
-            items = otp_cfg.sort_services(items, current()["raw"])
+            items = otp_cfg.sort_services(items, eff["raw"])
             title = "📲 Buy OTPs (All Apps)"
         else:
             items = catalog_items(await api.catalog("getCountries", operator=context["operator"]), "countries")
@@ -446,20 +618,7 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
                 # The provider's live operator list is authoritative; runtime
                 # admin toggles further restrict what the storefront offers.
                 operators_data = await api.catalog("getOperators")
-                if isinstance(operators_data, dict):
-                    provider_ops = set()
-                    for label, value in operators_data.items():
-                        # Published shape is {"Operator 1": "1"}; tolerate
-                        # numeric-ID keyed maps as well.
-                        if str(value).isdigit():
-                            provider_ops.add(str(value))
-                        elif str(label).isdigit():
-                            provider_ops.add(str(label))
-                elif isinstance(operators_data, list):
-                    provider_ops = {str(value) for value in operators_data if str(value).isdigit()}
-                else:
-                    provider_ops = set()
-                ops = tuple(op for op in eff["operators"] if op in provider_ops)
+                ops = available_operators(operators_data, eff["operators"])
                 if not ops:
                     raise ProviderError("No supported operators are currently available. Refresh the provider catalog or try later.")
                 token = view(uid, service=code, service_name=name)

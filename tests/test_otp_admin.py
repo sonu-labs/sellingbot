@@ -391,6 +391,8 @@ class Harness:
         self.number_calls = 0
         self.getnumber_error = None
         self.status_response = "STATUS_WAIT"
+        self.provider_calls = []
+        self.operators_response = {"Operator 1": "1", "Operator 2": "2", "Operator 3": "3"}
         register_otp_handlers(
             dp=self.dp, bot=self.bot, db=self.db, users_col=self.users,
             api_key=ENV_KEY, rate=100.0, markup=10.0,
@@ -402,10 +404,11 @@ class Harness:
             admin_log_id=admin_log_id)
 
         async def fake_call(action, **params):
+            self.provider_calls.append((action, dict(params)))
             if action == "getServices":
                 return {"tg": "Telegram", "wa": "WhatsApp", "ig": "Instagram", "xyz": "XYZ App"}
             if action == "getOperators":
-                return {"Operator 1": "1", "Operator 2": "2", "Operator 3": "3"}
+                return self.operators_response
             if action == "getCountries":
                 return {"22": "India", "0": "Russia"}
             if action == "getPricesV3":
@@ -476,6 +479,23 @@ class StorefrontRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await h.user_click(FakeCQ(buy_data))
         self.assertEqual(h.balance(), 89.0)
         self.assertEqual(h.number_calls, 1)
+
+    async def test_storefront_services_use_live_enabled_numeric_operator(self):
+        h = Harness()
+        h.operators_response = {"Operator 2": "2", "Operator 9": "9"}
+        cfg.set_operator_enabled(h.settings_col, "2", False, ADMIN)
+        await h.user_click(FakeCQ("otp:open"))
+        self.assertEqual(
+            [params for action, params in h.provider_calls if action == "getServices"],
+            [{"operator": "9"}],
+        )
+
+    async def test_storefront_fails_closed_on_non_numeric_operator_response(self):
+        h = Harness()
+        h.operators_response = {"error": "BAD_OPERATOR"}
+        msg = await h.user_click(FakeCQ("otp:open"))
+        self.assertIn("No enabled numeric operator", msg.last_text)
+        self.assertEqual([action for action, _ in h.provider_calls if action == "getServices"], [])
 
     async def test_runtime_key_changes_apply_without_restart(self):
         h = Harness()
@@ -713,6 +733,35 @@ class AdminFlowTests(unittest.IsolatedAsyncioTestCase):
         order = h.orders.find_one({"user_id": USER})
         self.assertEqual(order["status"], "cancelled")
         self.assertTrue(order["refunded"])
+
+
+class CatalogAdminTests(unittest.IsolatedAsyncioTestCase):
+    async def test_catalog_refresh_and_app_picker_use_live_enabled_operator(self):
+        h = Harness()
+        h.operators_response = {"Operator 4": "4", "Operator 7": 7}
+        cq = await h.admin_click("otpa:refreshcat")
+        self.assertIn("operator 4", cq.message.last_text)
+        self.assertEqual(
+            [params for action, params in h.provider_calls if action == "getServices"],
+            [{"operator": "4"}],
+        )
+        self.assertEqual(
+            [params for action, params in h.provider_calls if action == "getCountries"],
+            [{"operator": "4"}],
+        )
+        h.ctx["api"].clear_cache()
+        await h.admin_click("otpa:popadd")
+        self.assertEqual(
+            [params for action, params in h.provider_calls if action == "getServices"],
+            [{"operator": "4"}, {"operator": "4"}],
+        )
+
+    async def test_catalog_refresh_fails_closed_without_live_numeric_operator(self):
+        h = Harness()
+        h.operators_response = {"Operator 3": "three"}
+        cq = await h.admin_click("otpa:refreshcat")
+        self.assertIn("no enabled numeric operator", cq.message.last_text.lower())
+        self.assertEqual([action for action, _ in h.provider_calls if action == "getServices"], [])
 
 
 class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
