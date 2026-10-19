@@ -5,6 +5,7 @@ no network, no real API key and — critically — no real paid activation.
 """
 
 import copy
+import html
 import pathlib
 import sys
 import unittest
@@ -377,7 +378,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 class Harness:
     """Wires both handler sets against fakes with a stubbed provider."""
 
-    def __init__(self, balance=100.0):
+    def __init__(self, balance=100.0, admin_log_id=None):
         FakeMessage.sent = []
         self.db = FakeDB()
         self.settings_col = self.db["settings"]
@@ -397,11 +398,14 @@ class Harness:
         register_otp_admin_handlers(
             dp=self.dp, bot=self.bot, db=self.db, users_col=self.users,
             settings_col=self.settings_col, admin_ids=[ADMIN, ADMIN2],
-            env_api_key=ENV_KEY, env_markup=10.0, rate=100.0, otp_ctx=self.ctx)
+            env_api_key=ENV_KEY, env_markup=10.0, rate=100.0, otp_ctx=self.ctx,
+            admin_log_id=admin_log_id)
 
         async def fake_call(action, **params):
             if action == "getServices":
                 return {"tg": "Telegram", "wa": "WhatsApp", "ig": "Instagram", "xyz": "XYZ App"}
+            if action == "getOperators":
+                return {"Operator 1": "1", "Operator 2": "2", "Operator 3": "3"}
             if action == "getCountries":
                 return {"22": "India", "0": "Russia"}
             if action == "getPricesV3":
@@ -584,6 +588,17 @@ class AdminAuthorizationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AdminFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_raw_response_is_sent_to_admin_log_without_credentials(self):
+        h = Harness(admin_log_id=-100123)
+        raw = '{"22":{"wa":{"price":2.99,"count":467}}}'
+        await h.ctx["api"].response_logger(
+            "getPricesV3", {"country": "22", "api_key": ENV_KEY}, raw, 200)
+        chat_id, message = h.bot.sent[-1]
+        self.assertEqual(chat_id, -100123)
+        self.assertIn(raw, html.unescape(message))
+        self.assertIn("HTTP <code>200</code>", message)
+        self.assertNotIn(ENV_KEY, message)
+
     async def test_service_and_operator_toggles_persist_and_audit(self):
         h = Harness()
         await h.admin_click("otpa:togsvc")
