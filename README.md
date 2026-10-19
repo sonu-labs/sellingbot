@@ -13,6 +13,7 @@ A production-ready Telegram marketplace bot for digital accounts, social-media s
 - User-selectable INR (`₹`) or USD (`$`) display currency
 - Telegram and WhatsApp account marketplace, SMM reseller, product store and recharge flows
 - Admin-controlled SMM and WhatsApp visibility switches
+- Full **OTP Services admin panel** (`/otpadmin` or Admin → 📲 OTP Services) for the TemporaSMS All-Apps storefront: runtime API-key management, service/operator switches, markup control, provider tools and an orders/reconciliation dashboard
 - SMM provider keys managed from `/smmadmin` (private-chat entry; keys are not shown in panel settings)
 - Manual SMM service setup for the Telegram and Instagram customer categories, with INR pricing per 1,000 and minimum/maximum quantities
 - Central `/admin` control center with live analytics and bot/SMM-monitor health checks
@@ -67,11 +68,31 @@ catalog cache), promotes Telegram/Instagram/Facebook/WhatsApp/Google/TikTok,
 and paginates the complete catalog. Operators are 1, 2, 3, 4, 7, 8, 9 and 10.
 Prices and stock are fetched live before a two-minute purchase confirmation.
 
-Configure `TEMPORASMS_API_KEY` in the deployment environment, never in source.
-`OTP_MARKUP_PERCENT` defaults to **0** (no profit markup). Pricing assumes the
-provider account returns **USD** prices and converts at the project's fixed
-₹100/USD; verify the account currency and set a margin before launch.
-Existing wallet balances are used; no new payment gateway is required.
+Configure the TemporaSMS API key from **`/otpadmin`** (or **Admin → 📲 OTP
+Services → 🔑 API Key**) in a private chat: the key message is deleted, the key
+is validated with `getBalance` before saving when possible, and only a masked
+form is ever displayed. The database key takes priority over the
+`TEMPORASMS_API_KEY` environment variable (which remains as a fallback, and is
+still read directly by the separate Server 3 catalog module) and applies
+without a restart. Like the SMM provider keys, it is stored in MongoDB and is
+**not encrypted at rest by the bot** — protect database access accordingly.
+`OTP_MARKUP_PERCENT` defaults to **0** (no profit markup) and can likewise be
+overridden at runtime from `/otpadmin`; changing price/availability settings
+invalidates outstanding quotes so buyers always re-confirm the current price.
+Pricing assumes the provider account returns **USD** prices and converts at
+the project's fixed ₹100/USD; verify the account currency and set a margin
+before launch. Existing wallet balances are used; no new payment gateway is
+required.
+
+The OTP admin panel also provides: service ON/OFF, per-operator switches
+(1, 2, 3, 4, 7, 8, 9, 10), popular-app ordering and per-app visibility,
+provider tools (connection test / key validation, balance, catalog-cache
+refresh), and a paginated orders dashboard (waiting / completed /
+cancelled-refunded / unpaid / allocating / review). Switching the service or
+an operator off blocks only *new* purchases — existing orders can still be
+checked, cancelled and refunded. Every mutating admin action is recorded in
+`otp_admin_audit` without secrets; phone numbers and OTPs appear only on the
+admin-only order detail screen, never in lists, logs or audit records.
 
 Orders live in MongoDB `otp_orders`, navigation/quotes in `otp_views` (24-hour
 TTL), and idempotent debit/refund markers in the user document. A persistent
@@ -82,13 +103,20 @@ not sent to public sales channels. My OTP Orders allows manual checking/cancelli
 and paginated history.
 
 **Operational safety:** Do not retry ambiguous allocations automatically. Orders
-in `allocating` or `review` need operator reconciliation against the provider
-account: inspect `otp_orders` and the matching user's `otp_debits`/`otp_refunds`.
-A provider timeout can mean a number was allocated even without a response.
-Do not manually refund before confirming that no paid activation remains.
-Single-document wallet ledger updates are atomic; this is not a multi-document
-transaction system. Run one bot polling worker. At high volume, migrate ledger
-markers to a transactional ledger and use distributed polling locks.
+in `allocating` or `review` appear under **/otpadmin → OTP Orders → Review** for
+reconciliation: either attach the provider activation (verified via `getStatus`
+before anything changes) or, after confirming in the provider account that no
+paid activation exists, issue a manual refund — it requires a written reason and
+an explicit confirmation, and is recorded in the audit trail. A provider timeout
+can mean a number was allocated even without a response. Do not manually refund
+before confirming that no paid activation remains.
+Wallet debits/refunds use a single-document idempotent ledger (`otp_debits` /
+`otp_refunds` markers written in the same atomic user-document update as the
+balance change), which is crash-safe on any MongoDB deployment — including
+standalone instances without multi-document transaction support — and makes
+repeated clicks, retries and restarts safe. This is deliberately not a
+multi-document transaction system. Run one bot polling worker. At high volume,
+migrate ledger markers to a transactional ledger and use distributed polling locks.
 
 The provider's expanded API reference and a funded account were not available
 for a live end-to-end transaction during implementation. Before production,

@@ -13,41 +13,86 @@ from bson import ObjectId
 from aiogram import F
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton
 from rich_messages import safe_edit_or_send
+import otp_settings as otp_cfg
 
 BASE_URL = "https://api.temporasms.com/stubs/handler_api.php"
 OPERATORS = ("1", "2", "3", "4", "7", "8", "9", "10")
 POPULAR = ("telegram", "instagram", "facebook", "whatsapp", "google", "tiktok")
 log = logging.getLogger(__name__)
 
+PROVIDER_ERROR_CODES = {"BAD_KEY", "USER_BANNED", "ERROR", "BAD_ACTION", "BAD_SERVICE", "BAD_COUNTRY", "BAD_OPERATOR", "NO_BALANCE", "NO_NUMBERS", "TOO_MANY_REQUESTS", "UNDER_DEVELOPMENT", "WRONG_MAX_PRICE", "BAD_PRICE"}
+
 
 class ProviderError(Exception):
-    pass
+    """User-safe provider failure.
+
+    ``code`` carries the provider's non-secret error token (e.g. ``BAD_KEY``)
+    or ``CONNECTION``/``NOT_CONFIGURED`` so admin tooling can explain *why*
+    a validation failed without ever exposing credentials.
+    """
+
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+
+def parse_balance(data):
+    """Parse a ``getBalance`` response (``ACCESS_BALANCE:<amount>``)."""
+    if isinstance(data, str) and data.startswith("ACCESS_BALANCE:"):
+        try:
+            value = float(data.split(":", 1)[1])
+        except ValueError:
+            raise ProviderError("Provider returned an unreadable balance.", code="BAD_RESPONSE") from None
+        if math.isfinite(value):
+            return value
+    raise ProviderError("Provider did not return a balance.", code="BAD_RESPONSE")
 
 
 class TemporaClient:
+    """TemporaSMS client. ``key`` may be a static string or a zero-argument
+    callable returning the current key, which is how admin-panel key changes
+    apply at runtime without a restart."""
+
     def __init__(self, key):
-        self.key = key
+        self._key_source = key
         self.cache = {}
 
+    @property
+    def key(self):
+        source = self._key_source
+        return source() if callable(source) else (source or "")
+
+    @key.setter
+    def key(self, value):
+        self._key_source = value
+
+    def clear_cache(self):
+        self.cache.clear()
+
     async def call(self, action, **params):
-        if not self.key:
-            raise ProviderError("OTP service is not configured yet. Please contact support.")
+        key = self.key
+        if not key:
+            raise ProviderError("OTP service is not configured yet. Please contact support.", code="NOT_CONFIGURED")
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as session:
-                async with session.post(BASE_URL, data={"api_key": self.key, "action": action, **{k: str(v) for k, v in params.items()}}) as response:
+                async with session.post(BASE_URL, data={"api_key": key, "action": action, **{k: str(v) for k, v in params.items()}}) as response:
                     response.raise_for_status()
                     raw = (await response.text()).strip()
         except (aiohttp.ClientError, asyncio.TimeoutError):
             # Never log request URLs, exceptions or secrets.
-            raise ProviderError("Provider connection interrupted. Please check My OTP Orders before retrying.") from None
+            raise ProviderError("Provider connection interrupted. Please check My OTP Orders before retrying.", code="CONNECTION") from None
         try:
             data = json.loads(raw)
         except ValueError:
             data = raw
-        if isinstance(data, str) and data in {"BAD_KEY", "USER_BANNED", "ERROR", "BAD_ACTION", "BAD_SERVICE", "BAD_COUNTRY", "BAD_OPERATOR", "NO_BALANCE", "NO_NUMBERS", "TOO_MANY_REQUESTS", "UNDER_DEVELOPMENT", "WRONG_MAX_PRICE", "BAD_PRICE"}:
+        if isinstance(data, str) and data in PROVIDER_ERROR_CODES:
             messages = {"NO_NUMBERS": "Out of stock. Try another country or operator.", "TOO_MANY_REQUESTS": "Provider is busy. Please wait before retrying."}
-            raise ProviderError(messages.get(data, "Provider unavailable for this selection. Please try later or contact support."))
+            raise ProviderError(messages.get(data, "Provider unavailable for this selection. Please try later or contact support."), code=data)
         return data
+
+    async def get_balance(self):
+        """Provider account balance (also validates the configured key)."""
+        return parse_balance(await self.call("getBalance"))
 
     async def catalog(self, action, **params):
         key = (action, tuple(sorted(params.items())))
@@ -105,10 +150,30 @@ def retail_price(cost, rate, markup):
     return float((Decimal(str(cost)) * Decimal(str(rate)) * (1 + Decimal(str(markup)) / 100)).quantize(Decimal("0.01"), rounding=ROUND_UP))
 
 
-def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0):
+def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, settings_col=None, registry=None):
     if not math.isfinite(float(markup)) or float(markup) < 0:
         raise ValueError("OTP_MARKUP_PERCENT must be a finite, non-negative percentage")
-    api = TemporaClient(api_key)
+    env_key, env_markup = api_key, float(markup)
+
+    def current():
+        """Effective runtime settings.
+
+        With a settings collection, admin-panel changes (DB key, markup,
+        service switch, operator toggles) apply immediately; the static
+        constructor arguments act as the environment fallback.  Without one
+        the historic static behaviour is preserved exactly.
+        """
+        if settings_col is None:
+            return {"raw": {}, "enabled": True, "api_key": env_key or "", "key_source": "environment" if env_key else None,
+                    "markup": env_markup, "markup_source": "environment", "rate": float(rate),
+                    "operators": OPERATORS, "version": 0}
+        return otp_cfg.effective_settings(settings_col, env_key, env_markup, rate)
+
+    def require_purchase_open(eff):
+        if not eff["enabled"]:
+            raise ProviderError("OTP service is temporarily disabled by the admin. Existing orders remain available in My OTP Orders.")
+
+    api = TemporaClient(lambda: current()["api_key"] if settings_col is not None else env_key)
     views, orders = db["otp_views"], db["otp_orders"]
     locks = {}  # Serialize check/cancel/purchase per user within this worker.
 
@@ -125,10 +190,29 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0):
         await safe_edit_or_send(bot, cq.message, text, reply_markup=keyboard(rows))
 
     def credit(order):
-        # A durable ledger in the same user document makes retries crash-safe.
+        """Refund an order exactly once and return True if money was returned.
+
+        Crash-safety: the wallet credit and its idempotency marker live in a
+        single user document, so that one update is atomic on every MongoDB
+        deployment (standalone included — no multi-document transaction
+        support required).  The guarded filter (``otp_refunds: {$ne: oid}``)
+        makes repeated calls, retries and post-crash replays no-ops.  The
+        order document is only marked refunded after the ledger state is
+        re-read, so a crash between the two writes is healed by the next
+        ``credit``/worker pass instead of double-paying.
+        """
         uid, oid = order["user_id"], str(order["_id"])
         users_col.update_one({"_id": uid, "otp_debits": oid, "otp_refunds": {"$ne": oid}}, {"$inc": {"balance": order["price"]}, "$addToSet": {"otp_refunds": oid}})
-        orders.update_one({"_id": order["_id"]}, {"$set": {"status": "cancelled", "refunded": True}})
+        user = users_col.find_one({"_id": uid}) or {}
+        refunded = oid in (user.get("otp_refunds") or [])
+        debited = oid in (user.get("otp_debits") or [])
+        patch = {"status": "cancelled", "refunded": refunded, "updated_at": datetime.utcnow()}
+        if refunded:
+            patch["refunded_at"] = datetime.utcnow()
+        elif not debited:
+            patch["refund_note"] = "No wallet debit found for this order; nothing to refund."
+        orders.update_one({"_id": order["_id"]}, {"$set": patch})
+        return refunded
 
     async def refresh(order, cancel=False):
         if order["status"] != "waiting":
@@ -137,17 +221,51 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0):
             return
         data = await api.call("getStatus", id=order["activation_id"])
         if isinstance(data, str) and data.startswith("STATUS_OK:"):
-            orders.update_one({"_id": order["_id"], "status": "waiting"}, {"$set": {"status": "completed", "otp": data.split(":", 1)[1]}})
+            orders.update_one({"_id": order["_id"], "status": "waiting"}, {"$set": {"status": "completed", "otp": data.split(":", 1)[1], "updated_at": datetime.utcnow()}})
         elif data == "STATUS_CANCEL":
-            orders.update_one({"_id": order["_id"]}, {"$set": {"status": "refunding"}})
+            orders.update_one({"_id": order["_id"]}, {"$set": {"status": "refunding", "updated_at": datetime.utcnow()}})
             credit(order)
         elif cancel:
             result = await api.call("setStatus", id=order["activation_id"], status=8)
             if result in ("ACCESS_CANCEL", "STATUS_CANCEL"):
-                orders.update_one({"_id": order["_id"]}, {"$set": {"status": "refunding"}})
+                orders.update_one({"_id": order["_id"]}, {"$set": {"status": "refunding", "updated_at": datetime.utcnow()}})
                 credit(order)
             else:
                 raise ProviderError("Cancellation not confirmed. Wait a little and check again. No refund issued yet.")
+
+    async def refresh_locked(order_id, cancel=False):
+        """Reload an order under its per-user lock and refresh provider state.
+
+        Used by the admin panel so admin refresh/cancel can never race the
+        buyer or the background worker into a double refund.
+        """
+        order = orders.find_one({"_id": order_id})
+        if not order:
+            return None
+        async with locks.setdefault(order["user_id"], asyncio.Lock()):
+            fresh = orders.find_one({"_id": order_id})
+            if fresh:
+                await refresh(fresh, cancel)
+            return orders.find_one({"_id": order_id})
+
+    async def manual_refund_locked(order_id):
+        """Idempotent admin refund for orders with no confirmed allocation.
+
+        Only ``allocating``/``review``/``refunding`` orders qualify; a
+        ``waiting`` order has a live provider activation and must go
+        through the provider-confirmed cancellation path instead.
+        Returns ``(order, refunded_bool)``.
+        """
+        order = orders.find_one({"_id": order_id})
+        if not order:
+            return None, False
+        async with locks.setdefault(order["user_id"], asyncio.Lock()):
+            fresh = orders.find_one({"_id": order_id})
+            if not fresh or fresh["status"] not in ("allocating", "review", "refunding"):
+                return fresh, False
+            orders.update_one({"_id": order_id}, {"$set": {"status": "refunding", "updated_at": datetime.utcnow()}})
+            refunded = credit(fresh)
+            return orders.find_one({"_id": order_id}), refunded
 
     async def render_order(cq, order):
         oid = str(order["_id"])
@@ -174,7 +292,9 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0):
         context = context or {}
         if kind == "services":
             items = catalog_items(await api.catalog("getServices"), "services")
-            items.sort(key=lambda x: (next((i for i, name in enumerate(POPULAR) if name in x[1].casefold()), 99), x[1].casefold()))
+            # Admin popular ordering / hidden apps (falls back to the
+            # historic built-in ordering when nothing is configured).
+            items = otp_cfg.sort_services(items, current()["raw"])
             title = "📲 Buy OTPs (All Apps)"
         else:
             items = catalog_items(await api.catalog("getCountries", operator=context["operator"]), "countries")
@@ -211,6 +331,13 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0):
     async def dispatch(cq):
         parts, uid = cq.data.split(":"), cq.from_user.id
         action = parts[1]
+        eff = current()
+        # Existing orders (history/check/cancel) stay reachable even when
+        # the service is switched off; only new purchases are gated.  The
+        # gate runs here, at dispatch time, so stale buttons on old
+        # messages cannot start a purchase either.
+        if action not in ("history", "check", "cancel"):
+            require_purchase_open(eff)
         if action == "open":
             return await listing(cq, "services")
         if action == "history":
@@ -240,19 +367,29 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0):
         if action == "select":
             code, name = doc["items"][int(parts[3])]
             if doc["kind"] == "services":
+                if code in otp_cfg.hidden_codes(eff["raw"]):
+                    raise ProviderError("This app is currently unavailable. Please choose another app.")
+                ops = eff["operators"]
+                if not ops:
+                    raise ProviderError("No operators are currently available. Please try later.")
                 token = view(uid, service=code, service_name=name)
-                return await show(cq, f"<b>{escape(name)} · Select Operator</b>\nLive country availability and stock depend on the selected operator.", [[button(f"Operator {op}", f"otp:operator:{token}:{op}")] for op in OPERATORS] + [[button("⬅️ Apps", "otp:open")]])
+                return await show(cq, f"<b>{escape(name)} · Select Operator</b>\nLive country availability and stock depend on the selected operator.", [[button(f"Operator {op}", f"otp:operator:{token}:{op}")] for op in ops] + [[button("⬅️ Apps", "otp:open")]])
             ctx = {**doc["context"], "country": code, "country_name": name}
+            if ctx["operator"] not in eff["operators"]:
+                raise ProviderError("This operator is currently unavailable. Please choose another operator.")
             options = price_options(await api.call("getPricesV3", country=code, service=ctx["service"], operator=ctx["operator"]), code, ctx["service"])
             if not options:
                 raise ProviderError("No live stock for this country/operator. Try another selection.")
             option = options[0]
-            price = retail_price(option["cost"], rate, markup)
-            token = view(uid, **ctx, cost=option["cost"], provider=option["provider"], price=price)
+            price = retail_price(option["cost"], eff["rate"], eff["markup"])
+            # Stamp the quote with the settings it was priced under; any
+            # admin change bumps the version and forces a fresh quote.
+            token = view(uid, **ctx, cost=option["cost"], provider=option["provider"], price=price,
+                         settings_version=eff["version"], markup=eff["markup"], rate=eff["rate"])
             return await show(cq, f"<b>Confirm OTP Purchase</b>\n\nApp: {escape(ctx['service_name'])}\nCountry: {escape(name)}\nOperator: {ctx['operator']}\nStock: {option['stock']}\n<b>Wallet charge: ₹{price:.2f}</b>\n\nQuote valid for 2 minutes. No OTP? Cancel for a refund once confirmed by provider.", [[button(f"✅ Buy · ₹{price:.2f}", f"otp:buy:{token}")], [button("⬅️ Apps", "otp:open")]])
         if action == "operator":
-            if parts[3] not in OPERATORS:
-                raise ProviderError("Invalid operator.")
+            if parts[3] not in OPERATORS or parts[3] not in eff["operators"]:
+                raise ProviderError("This operator is currently unavailable. Please choose another operator.")
             return await listing(cq, "countries", {"service": doc["service"], "service_name": doc["service_name"], "operator": parts[3]})
         if action == "buy":
             existing = orders.find_one({"_id": doc["_id"], "user_id": uid})
@@ -260,14 +397,23 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0):
                 return await render_order(cq, existing)
             if datetime.utcnow() - doc["created_at"] > timedelta(minutes=2):
                 raise ProviderError("Quote expired. Please select your country again for current pricing.")
+            # Re-validate against *current* settings: a markup/key/operator
+            # change (or service switch-off, checked above) since the quote
+            # was shown must produce a fresh confirmation, never a charge
+            # at a price the user did not just confirm.
+            if int(doc.get("settings_version") or 0) != eff["version"] or doc.get("operator") not in eff["operators"]:
+                raise ProviderError("Pricing or availability just changed. Please select your country again to confirm the current price.")
+            if abs(retail_price(doc["cost"], eff["rate"], eff["markup"]) - float(doc["price"])) > 0.001:
+                raise ProviderError("Pricing just changed. Please select your country again to confirm the current price.")
             # Persist intent BEFORE touching money or allocating a paid number.
             order = {k: doc[k] for k in ("service", "service_name", "country", "country_name", "operator", "price", "cost", "provider")}
-            order.update(_id=doc["_id"], user_id=uid, status="allocating", created_at=datetime.utcnow())
+            order.update(_id=doc["_id"], user_id=uid, status="allocating", created_at=datetime.utcnow(),
+                         updated_at=datetime.utcnow(), markup=eff["markup"], rate=eff["rate"])
             orders.insert_one(order)
             oid = str(order["_id"])
             charged = users_col.update_one({"_id": uid, "balance": {"$gte": order["price"]}, "otp_debits": {"$ne": oid}}, {"$inc": {"balance": -order["price"]}, "$addToSet": {"otp_debits": oid}})
             if not charged.modified_count:
-                orders.update_one({"_id": order["_id"]}, {"$set": {"status": "unpaid"}})
+                orders.update_one({"_id": order["_id"]}, {"$set": {"status": "unpaid", "updated_at": datetime.utcnow()}})
                 raise ProviderError("Insufficient wallet balance. Recharge and create a new quote.")
             params = {"service": order["service"], "country": order["country"], "operator": order["operator"], "maxPrice": order["cost"]}
             if order.get("provider"):
@@ -277,16 +423,16 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0):
             except ProviderError as exc:
                 # Connection ambiguity must NOT trigger a free refund + duplicate purchase.
                 if str(exc).startswith("Out of stock") or str(exc).startswith("Provider unavailable") or str(exc).startswith("Provider is busy"):
-                    orders.update_one({"_id": order["_id"]}, {"$set": {"status": "refunding"}})
+                    orders.update_one({"_id": order["_id"]}, {"$set": {"status": "refunding", "updated_at": datetime.utcnow()}})
                     credit(order)
                 else:
-                    orders.update_one({"_id": order["_id"]}, {"$set": {"status": "review"}})
+                    orders.update_one({"_id": order["_id"]}, {"$set": {"status": "review", "updated_at": datetime.utcnow()}})
                 raise
             if isinstance(result, str) and result.startswith("ACCESS_NUMBER:") and len(result.split(":")) == 3:
                 _, activation, number = result.split(":")
-                orders.update_one({"_id": order["_id"]}, {"$set": {"status": "waiting", "activation_id": activation, "number": number}})
+                orders.update_one({"_id": order["_id"]}, {"$set": {"status": "waiting", "activation_id": activation, "number": number, "updated_at": datetime.utcnow()}})
             else:
-                orders.update_one({"_id": order["_id"]}, {"$set": {"status": "review"}})
+                orders.update_one({"_id": order["_id"]}, {"$set": {"status": "review", "updated_at": datetime.utcnow()}})
             return await render_order(cq, orders.find_one({"_id": order["_id"]}))
 
     async def worker():
@@ -295,7 +441,16 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0):
             try:
                 views.create_index("created_at", expireAfterSeconds=86400)
                 orders.create_index([("user_id", 1), ("created_at", -1)])
-                orders.create_index("status")
+                orders.create_index([("status", 1), ("created_at", -1)])
+                # A crash between wallet debit and the provider response
+                # leaves an order in "allocating".  Surface it for admin
+                # reconciliation — never auto-refund or blind-retry, because
+                # the provider may have allocated (and charged for) a number.
+                stale_before = datetime.utcnow() - timedelta(minutes=10)
+                orders.update_many(
+                    {"status": "allocating", "created_at": {"$lt": stale_before}},
+                    {"$set": {"status": "review", "review_reason": "stale_allocating", "updated_at": datetime.utcnow()}},
+                )
                 for order in orders.find({"status": {"$in": ["waiting", "refunding"]}}):
                     async with locks.setdefault(order["user_id"], asyncio.Lock()):
                         current = orders.find_one({"_id": order["_id"]})
@@ -314,4 +469,16 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0):
                 log.error("OTP worker iteration failed (details suppressed)")
             await asyncio.sleep(30)
 
+    if registry is not None:
+        # Shared handles for the admin panel: same client (runtime key +
+        # catalog cache), same per-user locks, same idempotent money paths.
+        registry.update({
+            "api": api,
+            "orders": orders,
+            "views": views,
+            "locks": locks,
+            "current": current,
+            "refresh_locked": refresh_locked,
+            "manual_refund_locked": manual_refund_locked,
+        })
     return worker
