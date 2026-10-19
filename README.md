@@ -58,3 +58,41 @@ Provider credentials are saved in the bot database and should be protected with 
 ## Rich-message compatibility
 
 The bot uses `sendRichMessage` and rich edits by default. If Telegram rejects a rich request, it automatically retries through the original classic message path. Button colors are intentionally disabled; buttons use Premium custom-emoji icons where a matching bundled emoji ID exists.
+
+### Buy OTPs (All Apps)
+
+The main menu now includes **Buy OTPs (All Apps)** above Social Media Services.
+It loads services and operator-specific countries from TemporaSMS (five-minute
+catalog cache), promotes Telegram/Instagram/Facebook/WhatsApp/Google/TikTok,
+and paginates the complete catalog. Operators are 1, 2, 3, 4, 7, 8, 9 and 10.
+Prices and stock are fetched live before a two-minute purchase confirmation.
+
+Configure `TEMPORASMS_API_KEY` in the deployment environment, never in source.
+`OTP_MARKUP_PERCENT` defaults to **0** (no profit markup). Pricing assumes the
+provider account returns **USD** prices and converts at the project's fixed
+₹100/USD; verify the account currency and set a margin before launch.
+Existing wallet balances are used; no new payment gateway is required.
+
+Orders live in MongoDB `otp_orders`, navigation/quotes in `otp_views` (24-hour
+TTL), and idempotent debit/refund markers in the user document. A persistent
+background checker resumes waiting orders after restarts, checks approximately
+every 30 seconds (longer with many active orders), and requests cancellation after
+20 minutes. Refunds require provider cancellation confirmation. OTPs are private,
+not sent to public sales channels. My OTP Orders allows manual checking/cancelling
+and paginated history.
+
+**Operational safety:** Do not retry ambiguous allocations automatically. Orders
+in `allocating` or `review` need operator reconciliation against the provider
+account: inspect `otp_orders` and the matching user's `otp_debits`/`otp_refunds`.
+A provider timeout can mean a number was allocated even without a response.
+Do not manually refund before confirming that no paid activation remains.
+Single-document wallet ledger updates are atomic; this is not a multi-document
+transaction system. Run one bot polling worker. At high volume, migrate ledger
+markers to a transactional ledger and use distributed polling locks.
+
+The provider's expanded API reference and a funded account were not available
+for a live end-to-end transaction during implementation. Before production,
+verify actual `getServices`, `getCountries`, `getPricesV3` response shapes,
+`getStatus` / `setStatus(status=8)` semantics, cancellation timing and currency
+with a low-cost controlled activation. Unknown price shapes/absent stock fail
+closed rather than charging guessed prices.

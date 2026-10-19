@@ -36,6 +36,7 @@ import random
 from aiogram.types import InputMediaVideo
 from admin_analytics import summarize_analytics, utc_naive
 from recharge_flow import register_recharge_handlers
+from otp import register_otp_handlers
 from smm import register_smm_handlers
 from server3 import register_server3_handlers
 from mustjoin import (
@@ -750,6 +751,7 @@ def build_main_menu(user_id: int, full_name: str) -> tuple[str, InlineKeyboardMa
         premium_button(text=f"💳 {tr(user, 'recharge')}", callback_data="recharge"),
         premium_button(text=f"👤 {tr(user, 'account')}", callback_data="stats"),
     ])
+    rows.append([premium_button(text="📲 Buy OTPs (All Apps)", callback_data="otp:open")])
     if features.get("smm_enabled", True):
         rows.append([premium_button(text=f"🚀 {tr(user, 'smm')}", callback_data="smm_open")])
 
@@ -6470,6 +6472,11 @@ s3_send_countries_message = register_server3_handlers(
     SALES=SALES, TEMPORASMS_API_KEY=TEMPORASMS_API_KEY,
     BOTUSER=BOTUSER, CHANNEL=CHANNEL
 )
+otp_background_task = register_otp_handlers(
+    dp=dp, bot=bot, db=db, users_col=users_col,
+    api_key=TEMPORASMS_API_KEY, rate=USD_TO_INR,
+    markup=float(os.getenv("OTP_MARKUP_PERCENT", "0")),
+)
 # ===== Bot Runner =====
 async def main():
     global BOT_STARTED_AT, SMM_BACKGROUND_TASK
@@ -6498,7 +6505,12 @@ async def main():
     start_auto_sweeper()  # launches the UPI/FamPay background auto-verify loop
     SMM_BACKGROUND_TASK = asyncio.create_task(smm_background_task(), name="smm-order-status-checker")
 
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    otp_task = asyncio.create_task(otp_background_task(), name="otp-status-checker")
+    try:
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        otp_task.cancel()
+        await asyncio.gather(otp_task, return_exceptions=True)
 
 if __name__ == "__main__":
     import traceback
