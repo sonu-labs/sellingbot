@@ -30,7 +30,22 @@ from datetime import datetime
 SETTINGS_ID = "otp_services"
 
 # Operators offered by the TemporaSMS routes used by this storefront.
+# ``operator`` is a *numeric direct route* only (provider docs).
 ALL_OPERATORS = ("1", "2", "3", "4", "7", "8", "9", "10")
+
+# Automatic operator selection (provider docs): sent as ``type=<value>``
+# instead of ``operator``, and routed by the provider across the operators
+# eligible for the submitted service + country.
+#
+#   smart — eligible operators for this exact service/country, chosen from
+#           current delivery evidence
+#   auto  — lowest final price first, trying the next operator if unavailable
+#   cheap — only the single lowest-priced eligible operator
+#   best  — highest success-rate operator first, then the next if unavailable
+AUTO_ROUTE_TYPES = ("smart", "auto", "cheap", "best")
+
+# Everything an admin can switch on/off: numeric lines + automatic routing.
+ALL_ROUTES = AUTO_ROUTE_TYPES + ALL_OPERATORS
 
 # Built-in popular-app ordering (name fragments) used until an admin
 # configures an explicit popular list.  Matches the historic behaviour.
@@ -207,25 +222,66 @@ def clear_markup(settings_col, admin_id):
 
 
 # --------------------------------------------------------------------------
-# Operators
+# Operators (numeric direct routes) + automatic routing types
 # --------------------------------------------------------------------------
 
+def normalize_route(raw):
+    """Return a canonical route value, or ``None`` when it is not a route.
+
+    Numeric strings are direct operator routes; the documented automatic
+    selection values (``smart``/``auto``/``cheap``/``best``) are matched
+    case-insensitively.  Anything else — including provider error tokens —
+    is rejected so it can never be sent to the API.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in AUTO_ROUTE_TYPES:
+        return lowered
+    if text.isdigit():
+        number = int(text)
+        return str(number) if 1 <= number <= 999999 else None
+    return None
+
+
+def is_auto_route(route) -> bool:
+    return str(route or "").strip().lower() in AUTO_ROUTE_TYPES
+
+
+def disabled_routes(settings):
+    return {str(route) for route in (settings or {}).get("disabled_operators") or []}
+
+
 def enabled_operators(settings):
-    disabled = {str(op) for op in (settings or {}).get("disabled_operators") or []}
+    """Enabled *numeric* operators, in the documented order."""
+    disabled = disabled_routes(settings)
     return tuple(op for op in ALL_OPERATORS if op not in disabled)
 
 
+def enabled_auto_types(settings):
+    """Enabled automatic routing types, in the documented order."""
+    disabled = disabled_routes(settings)
+    return tuple(route for route in AUTO_ROUTE_TYPES if route not in disabled)
+
+
+def enabled_routes(settings):
+    """Every selectable route: automatic types first, then numeric lines."""
+    return enabled_auto_types(settings) + enabled_operators(settings)
+
+
 def set_operator_enabled(settings_col, operator, enabled, admin_id):
-    operator = str(operator)
-    if operator not in ALL_OPERATORS:
+    """Enable/disable a numeric operator *or* an automatic routing type."""
+    route = normalize_route(operator)
+    if route is None or route not in ALL_ROUTES:
         raise ValueError("Unknown operator.")
     settings = get_settings(settings_col)
-    disabled = {str(op) for op in settings.get("disabled_operators") or []}
+    disabled = disabled_routes(settings)
     if enabled:
-        disabled.discard(operator)
+        disabled.discard(route)
     else:
-        disabled.add(operator)
-    ordered = [op for op in ALL_OPERATORS if op in disabled]
+        disabled.add(route)
+    ordered = [entry for entry in ALL_ROUTES if entry in disabled]
     return _touch(settings_col, admin_id, bump_version=True,
                   extra={"disabled_operators": ordered})
 
@@ -320,6 +376,11 @@ def effective_settings(settings_col, env_key, env_markup, rate):
         "markup": markup,
         "markup_source": markup_source,
         "rate": float(rate),
+        # Numeric direct routes only (getServices/getCountries need these).
         "operators": enabled_operators(settings),
+        # Documented automatic selection values, sent as ``type=<value>``.
+        "auto_types": enabled_auto_types(settings),
+        # Everything the storefront may offer as a line choice.
+        "routes": enabled_routes(settings),
         "version": int(settings.get("settings_version") or 0),
     }

@@ -24,13 +24,35 @@ OPERATORS = ("1", "2", "3", "4", "7", "8", "9", "10")
 POPULAR = ("telegram", "instagram", "facebook", "whatsapp", "google", "tiktok")
 log = logging.getLogger(__name__)
 
+# Automatic operator selection (provider docs).  ``operator`` is a numeric
+# direct route only; these are sent as ``type=<value>`` and let the provider
+# pick among the operators eligible for the submitted service + country.
+AUTO_ROUTE_TYPES = otp_cfg.AUTO_ROUTE_TYPES
+ROUTE_LABELS = {"smart": "🤖 Smart", "auto": "⚡ Auto", "cheap": "💰 Cheap", "best": "🏆 Best"}
+ROUTE_DESCRIPTIONS = {
+    "smart": "eligible operators for this app and country, picked from live delivery evidence",
+    "auto": "lowest final price first, moving to the next operator if unavailable",
+    "cheap": "only the single lowest-priced eligible operator",
+    "best": "highest success-rate operator first, then the next if unavailable",
+}
+
 # Catalog presentation, matching the Server 2 / Server 3 country lists.
-PER_PAGE = 12            # catalog items per page
+PER_PAGE = 20            # catalog items per page
+GRID_COLUMNS = 2         # 10 rows x 2 columns: 10 left, 10 right
+LABEL_CHARS = 30         # item button label length for the two-column grid
 PAGER_ROW_WIDTH = 8      # numbered page buttons per keyboard row
 PAGE_WINDOW = 7          # numbered buttons kept for very long catalogs
 # Current-page marker.  "noop" is the bot-wide dead callback (answered with an
 # empty answerCallbackQuery by the Server 3 router), same as Server 2/3 lists.
 NOOP_CALLBACK = "noop"
+
+# Catalogs change rarely: fetch once, keep it in memory *and* MongoDB, and
+# reuse it instead of asking the provider on every screen.  The admin panel's
+# "Refresh Catalog Cache" drops both copies immediately.
+CATALOG_TTL = 3600
+# Alternative-route probes for one app+country are remembered briefly so a
+# known-dead combination is not re-probed on every tap.
+ROUTE_PROBE_TTL = 300
 
 # Storefront catalog search.  A plain string state is stored by aiogram's FSM
 # per user/chat, so another user's message can never continue this session
@@ -40,9 +62,10 @@ SEARCH_MAX_QUERY = 80
 
 # Provider tokens meaning "this selection is not routable".  A TemporaSMS
 # service code is operator-specific — the same code can work on one line and
-# be rejected on another — so these are answered with the operators that do
-# have live stock instead of being shown to the buyer.
-ROUTING_ERROR_CODES = frozenset({"BAD_SERVICE", "BAD_OPERATOR", "BAD_COUNTRY"})
+# be rejected on another — so these are answered with the routes that do have
+# live stock instead of being shown to the buyer.  ``BAD_TYPE`` covers a
+# deployment that does not accept the automatic-selection parameter.
+ROUTING_ERROR_CODES = frozenset({"BAD_SERVICE", "BAD_OPERATOR", "BAD_COUNTRY", "BAD_TYPE"})
 
 PROVIDER_ERROR_CODES = {
     "BAD_KEY", "USER_BANNED", "ERROR", "BAD_ACTION", "BAD_SERVICE", "BAD_COUNTRY",
@@ -81,11 +104,20 @@ def parse_balance(data):
 class TemporaClient:
     """TemporaSMS client. ``key`` may be a static string or a zero-argument
     callable returning the current key, which is how admin-panel key changes
-    apply at runtime without a restart."""
+    apply at runtime without a restart.
 
-    def __init__(self, key, response_logger=None):
+    Catalog reads (``getServices``/``getCountries``/``getOperators``) are
+    fetched once and reused: an in-memory copy plus a MongoDB copy so a
+    restart does not re-download the whole catalog either.  Only pricing and
+    allocation stay live.
+    """
+
+    def __init__(self, key, response_logger=None, catalog_col=None, catalog_ttl=CATALOG_TTL):
         self._key_source = key
         self.cache = {}
+        self.route_cache = {}
+        self.catalog_col = catalog_col
+        self.catalog_ttl = catalog_ttl
         self.response_logger = response_logger
 
     def set_response_logger(self, callback):
@@ -116,7 +148,61 @@ class TemporaClient:
         self._key_source = value
 
     def clear_cache(self):
+        """Drop every cached catalog and route probe (memory + MongoDB)."""
         self.cache.clear()
+        self.route_cache.clear()
+        if self.catalog_col is not None:
+            try:
+                self.catalog_col.delete_many({})
+            except Exception:
+                log.warning("OTP catalog cache cleanup failed")
+
+    @staticmethod
+    def _cache_key(action, params):
+        query = json.dumps({k: str(v) for k, v in sorted((params or {}).items())}, sort_keys=True)
+        return f"{action}:{query}"
+
+    def _read_stored(self, key):
+        """Fresh catalog copy from MongoDB, or ``None``."""
+        if self.catalog_col is None:
+            return None
+        try:
+            doc = self.catalog_col.find_one({"_id": key})
+        except Exception:
+            log.warning("OTP catalog cache read failed")
+            return None
+        if not doc or "data" not in doc:
+            return None
+        fetched = doc.get("fetched_at")
+        if not isinstance(fetched, datetime):
+            return None
+        if datetime.utcnow() - fetched > timedelta(seconds=self.catalog_ttl):
+            return None
+        return doc["data"]
+
+    def _write_stored(self, key, action, params, data):
+        if self.catalog_col is None:
+            return
+        try:
+            self.catalog_col.update_one({"_id": key}, {"$set": {
+                "action": action,
+                "params": {k: str(v) for k, v in (params or {}).items()},
+                "data": data,
+                "fetched_at": datetime.utcnow(),
+            }}, upsert=True)
+        except Exception:
+            # A cache write must never break a catalog read.
+            log.warning("OTP catalog cache write failed")
+
+    def cached_routes(self, service, country):
+        """Recently probed route results for one app+country, or ``None``."""
+        entry = self.route_cache.get((str(service), str(country)))
+        if entry and time.monotonic() - entry[0] < ROUTE_PROBE_TTL:
+            return entry[1]
+        return None
+
+    def remember_routes(self, service, country, results):
+        self.route_cache[(str(service), str(country))] = (time.monotonic(), dict(results))
 
     async def call(self, action, **params):
         key = self.key
@@ -161,12 +247,23 @@ class TemporaClient:
         return parse_balance(await self.call("getBalance"))
 
     async def catalog(self, action, **params):
-        key = (action, tuple(sorted(params.items())))
+        """Catalog read: memory → MongoDB → network (then stored in both).
+
+        Services, countries and operators change rarely, so the storefront
+        reuses one fetch for an hour instead of calling the provider on every
+        screen; the admin panel can force a refetch at any time.
+        """
+        key = self._cache_key(action, params)
         saved = self.cache.get(key)
-        if saved and time.monotonic() - saved[0] < 300:
+        if saved and time.monotonic() - saved[0] < self.catalog_ttl:
             return saved[1]
+        stored = self._read_stored(key)
+        if stored is not None:
+            self.cache[key] = (time.monotonic(), stored)
+            return stored
         data = await self.call(action, **params)
         self.cache[key] = (time.monotonic(), data)
+        self._write_stored(key, action, params, data)
         return data
 
 
@@ -416,6 +513,65 @@ def retail_price(cost, rate, markup):
     return float((Decimal(str(cost)) * Decimal(str(rate)) * (1 + Decimal(str(markup)) / 100)).quantize(Decimal("0.01"), rounding=ROUND_UP))
 
 
+def positive_cost(value):
+    """Finite provider cost above zero, or ``None``.
+
+    A purchase never proceeds without one: it is the value sent as
+    ``maxPrice``, the cap that keeps the provider charge at or below the price
+    the buyer confirmed.
+    """
+    try:
+        cost = float(value)
+    except (TypeError, ValueError):
+        return None
+    return cost if math.isfinite(cost) and cost > 0 else None
+
+
+def normalize_route(raw):
+    """Canonical route value (numeric operator or automatic type) or ``None``."""
+    return otp_cfg.normalize_route(raw)
+
+
+def is_auto_route(route):
+    """True for the documented automatic-selection values (``type=<value>``)."""
+    return otp_cfg.is_auto_route(route)
+
+
+def route_label(route):
+    """Buyer-facing label: ``Operator 9`` for a line, ``⚡ Auto`` for routing."""
+    route = str(route)
+    return ROUTE_LABELS.get(route.lower(), route.title()) if is_auto_route(route) else f"Operator {route}"
+
+
+def route_params(route):
+    """Provider parameters for a route.
+
+    ``operator`` is a numeric direct route only; automatic selection is sent
+    as ``type``.  Never both — an invalid combination is rejected outright.
+    """
+    route = str(route)
+    return {"type": route.lower()} if is_auto_route(route) else {"operator": route}
+
+
+def route_enabled(route, eff):
+    """Is this route still offered? Numeric lines must also be a known route."""
+    if is_auto_route(route):
+        return route in eff["auto_types"]
+    return route in OPERATORS and route in eff["operators"]
+
+
+def catalog_label(name, limit=LABEL_CHARS, byte_limit=64):
+    """Short button label for the two-column catalog grid.
+
+    Telegram rejects button text over 64 *bytes*, so multi-byte names are
+    trimmed by bytes and never mid-character.
+    """
+    text = str(name or "").strip()[:limit]
+    while text and len(text.encode("utf-8")) > byte_limit:
+        text = text[:-1]
+    return text or "…"
+
+
 def normalize_search(raw):
     """Trim and cap a user-supplied catalog query (max ``SEARCH_MAX_QUERY``)."""
     text = str(raw or "").strip()
@@ -506,14 +662,17 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
         if settings_col is None:
             return {"raw": {}, "enabled": True, "api_key": env_key or "", "key_source": "environment" if env_key else None,
                     "markup": env_markup, "markup_source": "environment", "rate": float(rate),
-                    "operators": OPERATORS, "version": 0}
+                    "operators": OPERATORS, "auto_types": AUTO_ROUTE_TYPES,
+                    "routes": AUTO_ROUTE_TYPES + OPERATORS, "version": 0}
         return otp_cfg.effective_settings(settings_col, env_key, env_markup, rate)
 
     def require_purchase_open(eff):
         if not eff["enabled"]:
             raise ProviderError("OTP service is temporarily disabled by the admin. Existing orders remain available in My OTP Orders.")
 
-    api = TemporaClient(lambda: current()["api_key"] if settings_col is not None else env_key)
+    catalog_col = db["otp_catalog"]
+    api = TemporaClient(lambda: current()["api_key"] if settings_col is not None else env_key,
+                        catalog_col=catalog_col)
     views, orders = db["otp_views"], db["otp_orders"]
     locks = {}  # Serialize check/cancel/purchase per user within this worker.
 
@@ -627,8 +786,11 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
 
     async def render_order(target_message, order):
         oid = str(order["_id"])
+        route = normalize_route(order.get("route") or order.get("route_type") or order.get("operator"))
         text = (f"<b>📲 OTP Order</b>\n\nApp: {escape(order['service_name'])}\nCountry: {escape(order['country_name'])}\n"
                 f"Price: ₹{order['price']:.2f}\nStatus: <b>{escape(order['status'])}</b>\n")
+        if route:
+            text += f"Line: {escape(route_label(route))}\n"
         rows = []
         if order.get("number"):
             text += f"Number: <code>{escape(order['number'])}</code>\n"
@@ -645,25 +807,45 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
         rows.append([button("📦 My OTP Orders", "otp:history"), button("📲 All Apps", "otp:open")])
         await show(target_message, text, rows)
 
+    async def country_catalog(route):
+        """Country list for a route.
+
+        ``operator`` is a numeric direct route only, so automatic routing uses
+        the shared country list — with the numeric catalog operator as a
+        fallback for deployments that reject a bare ``getCountries``.
+        """
+        if not is_auto_route(route):
+            return await api.catalog("getCountries", operator=route)
+        try:
+            data = await api.catalog("getCountries")
+        except ProviderError:
+            data = None
+        if data is not None and catalog_items(data, "countries"):
+            return data
+        operator = pick_operator(await api.catalog("getOperators"), current()["operators"])
+        return await api.catalog("getCountries", operator=operator)
+
     async def listing(target_message, uid, kind, context=None, page=0, search=None):
         """Render one catalog page (apps or countries), optionally filtered.
 
-        12 items per page with a numbered pager (current page marked
+        20 items per page as a two-column grid (10 left, 10 right — like the
+        Server 2 / Server 3 lists), with a numbered pager (current page marked
         ``• n •`` and wired to a noop callback), ⬅️/➡️ step buttons, and a
-        search button that survives page changes via the stored query.
+        search button whose query survives page changes.
         """
         context = context or {}
         eff = current()
         if kind == "services":
             # TemporaSMS requires a numeric operator on getServices; it is
-            # resolved from the live getOperators reply and admin toggles.
+            # resolved from the live getOperators reply and admin toggles,
+            # then reused from the catalog cache for the next hour.
             items, _operator = await fetch_services_catalog(api, eff["operators"])
             # Admin popular ordering / hidden apps (falls back to the
             # historic built-in ordering when nothing is configured).
             items = otp_cfg.sort_services(items, eff["raw"])
             title, numeric_codes = "📲 Buy OTPs (All Apps)", False
         else:
-            items = catalog_items(await api.catalog("getCountries", operator=context["operator"]), "countries")
+            items = catalog_items(await country_catalog(context.get("route") or context.get("operator")), "countries")
             title, numeric_codes = f"🌍 Select Country · {escape(context['service_name'])}", True
         if not items:
             raise ProviderError("No catalog available from provider. Please try later.")
@@ -672,8 +854,11 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
         pages = max(1, (len(matches) + PER_PAGE - 1) // PER_PAGE)
         page = max(0, min(page_arg(page), pages - 1))
         token = view(uid, kind=kind, context=context, items=items, page=page, search=query)
-        rows = [[button(name[:55], f"otp:select:{token}:{index}")]
-                for index, _code, name in matches[page * PER_PAGE:(page + 1) * PER_PAGE]]
+        page_items = matches[page * PER_PAGE:(page + 1) * PER_PAGE]
+        rows = []
+        for start in range(0, len(page_items), GRID_COLUMNS):
+            rows.append([button(catalog_label(name), f"otp:select:{token}:{index}")
+                         for index, _code, name in page_items[start:start + GRID_COLUMNS]])
         if matches:
             pager = pager_buttons(token, page, pages)
             for start in range(0, len(pager), PAGER_ROW_WIDTH):
@@ -700,85 +885,151 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
         rows.append([button("🏠 Main Menu", "back_main")])
         await show(target_message, f"<b>{title}</b>\n\n{summary}", rows)
 
-    async def probe_operator_stock(service, country, operators):
-        """Live-price ``service``/``country`` on every operator, in parallel.
+    async def probe_route_stock(service, country, routes):
+        """Live-price a selection on several routes at once.
 
-        Returns ``[(operator, best_option)]`` for the lines that actually have
-        positive stock, in the admin's operator order.  Each probe goes through
+        Returns ``[(route, best_option)]`` for the routes that actually have
+        positive stock, in the caller's order.  Results (including rejections)
+        are remembered for ``ROUTE_PROBE_TTL`` so a known-dead app/country
+        combination is not re-probed on every tap.  Each probe goes through
         the shared client, so the admin response log still receives the exact
         raw provider body for every call (never the API key).
         """
-        async def probe(operator):
+        wanted = []
+        for raw in routes:
+            route = normalize_route(raw)
+            if route and route not in wanted:
+                wanted.append(route)
+        if not wanted:
+            return []
+        known = api.cached_routes(service, country) or {}
+        missing = [route for route in wanted if route not in known]
+
+        async def probe(route):
             try:
-                data = await api.call("getPricesV3", country=country, service=service, operator=operator)
+                data = await api.call("getPricesV3", country=country, service=service,
+                                      **route_params(route))
             except ProviderError:
-                return None
+                return route, None
             except Exception:
                 # One bad probe must not abort the others inside gather().
-                log.warning("OTP operator probe failed for operator %s (details suppressed)", operator)
-                return None
+                log.warning("OTP route probe failed for route %s (details suppressed)", route)
+                return route, None
             options = price_options(data, country, service)
-            return (operator, options[0]) if options else None
+            return route, (options[0] if options else None)
 
-        if not operators:
-            return []
-        found = await asyncio.gather(*(probe(operator) for operator in operators))
-        return [entry for entry in found if entry]
+        if missing:
+            known = {**known, **dict(await asyncio.gather(*(probe(route) for route in missing)))}
+            api.remember_routes(service, country, known)
+        return [(route, known[route]) for route in wanted if known.get(route)]
 
-    async def show_operator_alternatives(target_message, uid, ctx, eff, listing_doc=None):
-        """Answer a routing rejection (BAD_SERVICE/…) with working lines.
+    async def show_route_alternatives(target_message, uid, ctx, eff, listing_doc=None):
+        """Answer a routing rejection with the routes that have live stock.
 
-        The raw provider token is never shown.  When another admin-enabled
-        operator has live stock the buyer gets one button per line and the
-        normal quote after re-pricing; otherwise this is a plain, actionable
-        message.  No order is created and no wallet debit happens here.
+        The raw provider token is never shown.  When another enabled route has
+        live stock the buyer gets one button per line and the normal quote
+        after re-pricing; otherwise this is a plain, actionable message.  No
+        order is created and no wallet debit happens here.
         """
         app, country_name = str(ctx["service_name"]), str(ctx["country_name"])
-        failing = str(ctx["operator"])
-        candidates = []
-        for raw in eff["operators"]:
-            operator = _operator_id(raw)
-            if operator and operator != failing and operator not in candidates:
-                candidates.append(operator)
-        working = await probe_operator_stock(ctx["service"], ctx["country"], candidates)
+        failing = normalize_route(ctx.get("route") or ctx.get("operator")) or str(ctx.get("route"))
+        candidates = [route for route in eff["routes"] if route != failing]
+        working = await probe_route_stock(ctx["service"], ctx["country"], candidates)
+        # Automatic routes usually price identically (they differ only in how
+        # the provider picks the operator), so keep the first of each distinct
+        # price/stock: real choices for the buyer, no duplicate buttons.
+        chosen, seen = [], set()
+        for route, option in working:
+            if is_auto_route(route):
+                marker = (round(float(option["cost"]), 6), option["stock"])
+                if marker in seen:
+                    continue
+                seen.add(marker)
+            chosen.append((route, option))
         back = [[button("⬅️ Countries", f"otp:page:{listing_doc['_id']}:{page_arg(listing_doc.get('page'))}")]] \
             if listing_doc is not None else []
-        if not working:
+        if not chosen:
             rows = back + [[button("📲 All Apps", "otp:open"), button("📦 My OTP Orders", "otp:history")],
                            [button("🏠 Main Menu", "back_main")]]
             return await show(target_message,
-                              f"{escape(app)} is not available on Operator {escape(failing)} for "
+                              f"{escape(app)} is not available on {escape(route_label(failing))} for "
                               f"{escape(country_name)}. Try another app, operator or country.", rows)
         # The token carries the selection only; pricing always happens live.
         token = view(uid, service=ctx["service"], service_name=app,
                      country=ctx["country"], country_name=country_name)
-        lines = "\n".join(f"• Operator {operator} — {option['stock']} in stock" for operator, option in working)
-        rows = [[button(f"Operator {operator}", f"otp:alt:{token}:{operator}")] for operator, _option in working]
+        lines = "\n".join(f"• {route_label(route)} — {option['stock']} in stock"
+                          for route, option in chosen)
+        rows = []
+        for start in range(0, len(chosen), GRID_COLUMNS):
+            rows.append([button(route_label(route), f"otp:alt:{token}:{route}")
+                         for route, _option in chosen[start:start + GRID_COLUMNS]])
         rows += back + [[button("📲 All Apps", "otp:open"), button("📦 My OTP Orders", "otp:history")]]
         await show(target_message,
-                   f"<b>{escape(app)} · Operator {escape(failing)} unavailable</b>\n\n"
-                   f"{escape(app)} is not available on Operator {escape(failing)} for {escape(country_name)} "
-                   f"right now. These lines have live stock — tap one to see the current price:\n{lines}", rows)
+                   f"<b>{escape(app)} · {escape(route_label(failing))} unavailable</b>\n\n"
+                   f"{escape(app)} is not available on {escape(route_label(failing))} for "
+                   f"{escape(country_name)} right now. These lines have live stock — tap one "
+                   f"to see the current price:\n{lines}", rows)
 
     async def show_quote(target_message, uid, ctx, eff, listing_doc=None):
         """Live-price a selection and render the standard confirmation screen."""
+        route = ctx["route"]
         try:
             data = await api.call("getPricesV3", country=ctx["country"],
-                                  service=ctx["service"], operator=ctx["operator"])
+                                  service=ctx["service"], **route_params(route))
         except ProviderError as exc:
             if (exc.code or "") not in ROUTING_ERROR_CODES:
                 raise
-            return await show_operator_alternatives(target_message, uid, ctx, eff, listing_doc)
+            return await show_route_alternatives(target_message, uid, ctx, eff, listing_doc)
         options = price_options(data, ctx["country"], ctx["service"])
         if not options:
             raise ProviderError("No live stock for this country/operator. Try another selection.")
         option = options[0]
         price = retail_price(option["cost"], eff["rate"], eff["markup"])
+        auto = is_auto_route(route)
+        line = f"Line: {escape(route_label(route))}" + (
+            f"\n<i>{escape(ROUTE_DESCRIPTIONS.get(route, ''))}</i>" if auto else "")
         # Stamp the quote with the settings it was priced under; any
-        # admin change bumps the version and forces a fresh quote.
-        token = view(uid, **ctx, cost=option["cost"], provider=option["provider"], price=price,
+        # admin change bumps the version and forces a fresh quote.  Fields are
+        # listed explicitly (not ``**ctx``) so a navigation snapshot that still
+        # carries the legacy ``operator`` key can never collide with it.
+        token = view(uid, service=ctx["service"], service_name=ctx["service_name"],
+                     country=ctx["country"], country_name=ctx["country_name"],
+                     route=route, operator=None if auto else route,
+                     route_type=route if auto else None,
+                     cost=option["cost"], provider=option["provider"], price=price,
                      settings_version=eff["version"], markup=eff["markup"], rate=eff["rate"])
-        await show(target_message, f"<b>Confirm OTP Purchase</b>\n\nApp: {escape(ctx['service_name'])}\nCountry: {escape(ctx['country_name'])}\nOperator: {ctx['operator']}\nStock: {option['stock']}\n<b>Wallet charge: ₹{price:.2f}</b>\n\nQuote valid for 2 minutes. No OTP? Cancel for a refund once confirmed by provider.", [[button(f"✅ Buy · ₹{price:.2f}", f"otp:buy:{token}")], [button("⬅️ Apps", "otp:open")]])
+        await show(target_message, f"<b>Confirm OTP Purchase</b>\n\nApp: {escape(ctx['service_name'])}\nCountry: {escape(ctx['country_name'])}\n{line}\nStock: {option['stock']}\n<b>Wallet charge: ₹{price:.2f}</b>\n\nQuote valid for 2 minutes. Provider cost is capped at ${option['cost']} (maxPrice), so you are never charged beyond this quote. No OTP? Cancel for a refund once confirmed by provider.", [[button(f"✅ Buy · ₹{price:.2f}", f"otp:buy:{token}")], [button("⬅️ Apps", "otp:open")]])
+
+    async def validate_purchase(doc, route, quoted_cost, eff):
+        """Live check at the moment of purchase — before any money moves.
+
+        Returns ``(live_cost, provider_ids)``.  Raises instead of charging when
+        the selection is no longer routable, the stock is gone, or the provider
+        price rose above the quote (the buyer must confirm a new price).  The
+        allocation afterwards still sends ``maxPrice = quoted_cost``, so the
+        provider can never cut more than the buyer paid for.
+        """
+        app, country_name = str(doc.get("service_name")), str(doc.get("country_name"))
+        try:
+            data = await api.call("getPricesV3", country=doc["country"],
+                                  service=doc["service"], **route_params(route))
+        except ProviderError as exc:
+            if (exc.code or "") in ROUTING_ERROR_CODES:
+                raise ProviderError(f"{app} is not available on {route_label(route)} for "
+                                    f"{country_name} right now. Nothing was charged — try another "
+                                    "app, operator or country.") from None
+            raise
+        options = price_options(data, doc["country"], doc["service"])
+        if not options:
+            raise ProviderError("Out of stock right now. Nothing was charged — try another "
+                                "country or operator.")
+        option = options[0]
+        if option["cost"] > quoted_cost + 1e-9:
+            new_price = retail_price(option["cost"], eff["rate"], eff["markup"])
+            raise ProviderError(f"The provider price just changed: {app} on {route_label(route)} "
+                                f"is now ₹{new_price:.2f}. Nothing was charged — please select the "
+                                "country again to confirm the new price.")
+        return option["cost"], option["provider"] or doc.get("provider")
 
     @dp.callback_query(F.data.startswith("otp:"))
     async def handler(cq, state: FSMContext):
@@ -902,34 +1153,56 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
             if doc["kind"] == "services":
                 if code in otp_cfg.hidden_codes(eff["raw"]):
                     raise ProviderError("This app is currently unavailable. Please choose another app.")
-                # The provider's live operator list is authoritative; runtime
-                # admin toggles further restrict what the storefront offers.
-                operators_data = await api.catalog("getOperators")
-                ops = available_operators(operators_data, eff["operators"])
-                if not ops:
+                # Automatic routing types first (the provider picks the best
+                # eligible operator), then the numeric direct routes that the
+                # live getOperators reply and the admin toggles allow.
+                routes = list(eff["auto_types"])
+                routes += [op for op in available_operators(await api.catalog("getOperators"),
+                                                            eff["operators"]) if op not in routes]
+                if not routes:
                     raise ProviderError("No supported operators are currently available. Refresh the provider catalog or try later.")
                 token = view(uid, service=code, service_name=name)
-                return await show(cq.message, f"<b>{escape(name)} · Select Operator</b>\nLive country availability and stock depend on the selected operator.", [[button(f"Operator {op}", f"otp:operator:{token}:{op}")] for op in ops] + [[button("⬅️ Apps", "otp:open")]])
-            ctx = {**doc["context"], "country": code, "country_name": name}
-            if ctx["operator"] not in eff["operators"]:
+                hints = "\n".join(f"• <b>{escape(route_label(route))}</b> — {escape(ROUTE_DESCRIPTIONS[route])}"
+                                  for route in routes if route in ROUTE_DESCRIPTIONS)
+                text = f"<b>{escape(name)} · Select Line</b>\n"
+                if hints:
+                    text += (f"\n{hints}\n\n<i>Automatic routing picks the operator for this app "
+                             "and country; you always confirm the price before anything is charged.</i>\n")
+                text += ("\nOperator buttons are direct numeric routes. Live country availability "
+                         "and stock depend on the selected line.")
+                rows = []
+                for start in range(0, len(routes), GRID_COLUMNS):
+                    rows.append([button(route_label(route), f"otp:operator:{token}:{route}")
+                                 for route in routes[start:start + GRID_COLUMNS]])
+                rows.append([button("⬅️ Apps", "otp:open")])
+                return await show(cq.message, text, rows)
+            route = normalize_route(doc["context"].get("route") or doc["context"].get("operator"))
+            if not route or not route_enabled(route, eff):
                 raise ProviderError("This operator is currently unavailable. Please choose another operator.")
+            ctx = {**doc["context"], "route": route, "country": code, "country_name": name}
             return await show_quote(cq.message, uid, ctx, eff, listing_doc=doc)
         if action == "operator":
-            operator = parts[3] if len(parts) > 3 else ""
-            if operator not in OPERATORS or operator not in eff["operators"]:
+            route = normalize_route(parts[3] if len(parts) > 3 else "")
+            if not route or not route_enabled(route, eff):
                 raise ProviderError("This operator is currently unavailable. Please choose another operator.")
-            return await listing(cq.message, uid, "countries", {"service": doc["service"], "service_name": doc["service_name"], "operator": operator})
+            # The token must be an app selection; a listing/quote token (stale
+            # or replayed button) is an expired selection, never a crash.
+            if not all(doc.get(field) for field in ("service", "service_name")):
+                raise ProviderError("Selection expired. Please reopen All Apps.")
+            return await listing(cq.message, uid, "countries", {"service": doc["service"],
+                                                                "service_name": doc["service_name"],
+                                                                "route": route})
         if action == "alt":
             # An alternative line offered after a routing rejection: validated
-            # like any operator choice, then re-priced live before the quote.
-            operator = parts[3] if len(parts) > 3 else ""
-            if operator not in OPERATORS or operator not in eff["operators"]:
+            # like any route choice, then re-priced live before the quote.
+            route = normalize_route(parts[3] if len(parts) > 3 else "")
+            if not route or not route_enabled(route, eff):
                 raise ProviderError("This operator is currently unavailable. Please choose another operator.")
             if not all(doc.get(field) for field in ("service", "service_name", "country", "country_name")):
                 raise ProviderError("Selection expired. Please reopen All Apps.")
             ctx = {"service": doc["service"], "service_name": doc["service_name"],
                    "country": doc["country"], "country_name": doc["country_name"],
-                   "operator": operator}
+                   "route": route}
             return await show_quote(cq.message, uid, ctx, eff)
         if action == "buy":
             existing = orders.find_one({"_id": doc["_id"], "user_id": uid})
@@ -937,25 +1210,41 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
                 return await render_order(cq.message, existing)
             if datetime.utcnow() - doc["created_at"] > timedelta(minutes=2):
                 raise ProviderError("Quote expired. Please select your country again for current pricing.")
+            route = normalize_route(doc.get("route") or doc.get("operator"))
             # Re-validate against *current* settings: a markup/key/operator
             # change (or service switch-off, checked above) since the quote
             # was shown must produce a fresh confirmation, never a charge
             # at a price the user did not just confirm.
-            if int(doc.get("settings_version") or 0) != eff["version"] or doc.get("operator") not in eff["operators"]:
+            if int(doc.get("settings_version") or 0) != eff["version"] or not route or not route_enabled(route, eff):
                 raise ProviderError("Pricing or availability just changed. Please select your country again to confirm the current price.")
-            if abs(retail_price(doc["cost"], eff["rate"], eff["markup"]) - float(doc["price"])) > 0.001:
+            quoted_cost = positive_cost(doc.get("cost"))
+            if quoted_cost is None or abs(retail_price(quoted_cost, eff["rate"], eff["markup"]) - float(doc["price"])) > 0.001:
                 raise ProviderError("Pricing just changed. Please select your country again to confirm the current price.")
+            # LIVE validation at the moment of purchase, before any money
+            # moves: the catalog is cached, so this single provider call is
+            # what decides whether the buy may proceed.
+            live_cost, provider_ids = await validate_purchase(doc, route, quoted_cost, eff)
             # Persist intent BEFORE touching money or allocating a paid number.
-            order = {k: doc[k] for k in ("service", "service_name", "country", "country_name", "operator", "price", "cost", "provider")}
+            order = {k: doc.get(k) for k in ("service", "service_name", "country", "country_name",
+                                             "price", "cost", "provider")}
             order.update(_id=doc["_id"], user_id=uid, status="allocating", created_at=datetime.utcnow(),
-                         updated_at=datetime.utcnow(), markup=eff["markup"], rate=eff["rate"])
+                         updated_at=datetime.utcnow(), markup=eff["markup"], rate=eff["rate"],
+                         route=route, operator=None if is_auto_route(route) else route,
+                         route_type=route if is_auto_route(route) else None, live_cost=live_cost)
+            if provider_ids:
+                order["provider"] = provider_ids
             orders.insert_one(order)
             oid = str(order["_id"])
             charged = users_col.update_one({"_id": uid, "balance": {"$gte": order["price"]}, "otp_debits": {"$ne": oid}}, {"$inc": {"balance": -order["price"]}, "$addToSet": {"otp_debits": oid}})
             if not charged.modified_count:
                 orders.update_one({"_id": order["_id"]}, {"$set": {"status": "unpaid", "updated_at": datetime.utcnow()}})
                 raise ProviderError("Insufficient wallet balance. Recharge and create a new quote.")
-            params = {"service": order["service"], "country": order["country"], "operator": order["operator"], "maxPrice": order["cost"]}
+            # maxPrice is mandatory on every allocation and equals the cost the
+            # retail price was computed from, so the provider can never charge
+            # more than the buyer paid for.  ``operator`` is sent only for a
+            # numeric direct route; automatic routing is sent as ``type``.
+            params = {"service": order["service"], "country": order["country"],
+                      **route_params(route), "maxPrice": order["cost"]}
             if order.get("provider"):
                 params["providerIds"] = order["provider"]
             try:
@@ -975,13 +1264,33 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
                 orders.update_one({"_id": order["_id"]}, {"$set": {"status": "review", "updated_at": datetime.utcnow()}})
             return await render_order(cq.message, orders.find_one({"_id": order["_id"]}))
 
+    async def warm_catalog():
+        """Fetch the catalog once at startup so the first tap needs no API call.
+
+        Best-effort: a missing key or an unreachable provider only skips the
+        warm-up, and the cached copy is reused for ``CATALOG_TTL`` afterwards.
+        """
+        try:
+            eff = current()
+            if not eff["api_key"] or not eff["enabled"]:
+                return
+            _items, operator = await fetch_services_catalog(api, eff["operators"])
+            await api.catalog("getCountries", operator=operator)
+            # Automatic routing reads the country list without an operator.
+            await api.catalog("getCountries")
+            log.info("OTP catalog cache warmed")
+        except Exception:
+            log.warning("OTP catalog warm-up skipped (details suppressed)")
+
     async def worker():
         # Persistent orders survive restarts; polling is not attached to a message.
+        await warm_catalog()
         while True:
             try:
                 views.create_index("created_at", expireAfterSeconds=86400)
                 orders.create_index([("user_id", 1), ("created_at", -1)])
                 orders.create_index([("status", 1), ("created_at", -1)])
+                catalog_col.create_index("fetched_at", expireAfterSeconds=86400)
                 # A crash between wallet debit and the provider response
                 # leaves an order in "allocating".  Surface it for admin
                 # reconciliation — never auto-refund or blind-retry, because

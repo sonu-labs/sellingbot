@@ -3,9 +3,11 @@ import pathlib
 import unittest
 from unittest.mock import patch
 from otp import (
-    OPERATORS, PER_PAGE, ProviderError, TemporaClient, available_operators, catalog_items,
-    fetch_services_catalog, filter_catalog, normalize_search, page_numbers, pager_buttons,
-    parse_operator_ids, pick_operator, price_options, retail_price,
+    AUTO_ROUTE_TYPES, GRID_COLUMNS, OPERATORS, PER_PAGE, ProviderError, TemporaClient,
+    available_operators, catalog_items, catalog_label, fetch_services_catalog, filter_catalog,
+    is_auto_route, normalize_route, normalize_search, page_numbers, pager_buttons,
+    parse_operator_ids, pick_operator, positive_cost, price_options, retail_price, route_label,
+    route_params,
 )
 
 
@@ -57,7 +59,7 @@ class CatalogPresentationTests(unittest.TestCase):
     """Pure helpers behind the storefront search box and the numbered pager."""
 
     def test_search_filtering_and_numbered_pager_helpers(self):
-        self.assertEqual(PER_PAGE, 12)
+        self.assertEqual((PER_PAGE, GRID_COLUMNS), (20, 2))   # 10 left, 10 right
         # Queries are trimmed and capped before they are stored or rendered.
         self.assertEqual(normalize_search("  Telegram  "), "Telegram")
         self.assertEqual(normalize_search("x" * 500), "x" * 80)
@@ -95,6 +97,50 @@ class CatalogPresentationTests(unittest.TestCase):
         self.assertIn("…", labels)
         self.assertTrue(all(data == "noop" or data.startswith("otp:page:TOK:") for _t, data in window))
         self.assertLessEqual(max(len(data) for _t, data in window), 64)
+
+
+class RouteHelperTests(unittest.TestCase):
+    """Numeric direct routes vs the documented automatic selection types."""
+
+    def test_documented_automatic_routes_are_supported(self):
+        self.assertEqual(AUTO_ROUTE_TYPES, ("smart", "auto", "cheap", "best"))
+        for route in AUTO_ROUTE_TYPES:
+            self.assertTrue(is_auto_route(route))
+            # Automatic selection is sent as type= and never as operator=.
+            self.assertEqual(route_params(route), {"type": route})
+            self.assertEqual(route_params(route.upper()), {"type": route})
+        for operator in OPERATORS:
+            self.assertFalse(is_auto_route(operator))
+            self.assertEqual(route_params(operator), {"operator": operator})
+
+    def test_route_normalization_rejects_everything_else(self):
+        self.assertEqual(normalize_route(" 9 "), "9")
+        self.assertEqual(normalize_route("AUTO"), "auto")
+        self.assertEqual(normalize_route(7), "7")
+        for bad in ("", None, "0", "-1", "1.5", "BAD_SERVICE", "operator 9", "9x", True):
+            self.assertIsNone(normalize_route(bad), bad)
+
+    def test_route_labels_are_buyer_friendly(self):
+        self.assertEqual(route_label("9"), "Operator 9")
+        self.assertEqual(route_label("auto"), "⚡ Auto")
+        self.assertEqual(route_label("smart"), "🤖 Smart")
+        self.assertEqual(route_label("cheap"), "💰 Cheap")
+        self.assertEqual(route_label("best"), "🏆 Best")
+
+    def test_catalog_labels_fit_telegram_buttons(self):
+        self.assertEqual(catalog_label("Telegram"), "Telegram")
+        self.assertEqual(len(catalog_label("x" * 200)), 30)
+        # Multi-byte names are trimmed by bytes, never mid-character.
+        cyrillic = catalog_label("Т" * 100)
+        self.assertLessEqual(len(cyrillic.encode("utf-8")), 64)
+        self.assertTrue(cyrillic)
+        self.assertEqual(catalog_label("  WhatsApp  "), "WhatsApp")
+
+    def test_positive_cost_gates_every_allocation(self):
+        self.assertEqual(positive_cost(0.1), 0.1)
+        self.assertEqual(positive_cost("2.99"), 2.99)
+        for bad in (0, -1, None, "", "abc", float("nan"), float("inf")):
+            self.assertIsNone(positive_cost(bad), bad)
 
 
 class OperatorParsingTests(unittest.TestCase):
