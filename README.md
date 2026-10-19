@@ -63,15 +63,89 @@ The bot uses `sendRichMessage` and rich edits by default. If Telegram rejects a 
 ### Buy OTPs (All Apps)
 
 The main menu now includes **Buy OTPs (All Apps)** above Social Media Services.
-It loads services and operator-specific countries from TemporaSMS (five-minute
-catalog cache), promotes Telegram/Instagram/Facebook/WhatsApp/Google/TikTok,
-and paginates the complete catalog. Operators are 1, 2, 3, 4, 7, 8, 9 and 10.
-Every `getServices` call (storefront, admin catalog refresh and the popular-app
-picker) passes a numeric operator resolved from the live `getOperators`
-response and intersected with the admin-enabled operators; TemporaSMS returns
-`BAD_OPERATOR` when that parameter is missing. Non-numeric or unavailable
-operator payloads fail closed instead of sending an invalid request.
-Prices and stock are fetched live before a two-minute purchase confirmation.
+It loads services and operator-specific countries from TemporaSMS **once** and
+reuses them: catalog reads (`getServices`, `getCountries`, `getOperators`) are
+cached in memory *and* in the MongoDB `otp_catalog` collection for one hour
+(`CATALOG_TTL`), warmed at startup, and reused after a restart — so browsing
+apps, lines, countries, pages and search results makes **zero** provider calls.
+Only pricing and allocation stay live. It promotes
+Telegram/Instagram/Facebook/WhatsApp/Google/TikTok and paginates the complete
+catalog. Every `getServices` call (storefront, admin catalog refresh and the
+popular-app picker) passes a numeric operator resolved from the live
+`getOperators` response and intersected with the admin-enabled operators;
+TemporaSMS returns `BAD_OPERATOR` when that parameter is missing. Non-numeric or
+unavailable operator payloads fail closed instead of sending an invalid request.
+Prices and stock are fetched live before a two-minute purchase confirmation and
+validated live again at the moment of purchase.
+
+**Catalog navigation** (apps and countries) works like the Server 2 / Server 3
+lists: **20 items per page laid out as a two-column grid — 10 down the left, 10
+down the right** (`PER_PAGE` / `GRID_COLUMNS`), numbered page buttons (`1`, `2`,
+… with `• n •` marking the current page as a dead button) plus ⬅️/➡️ step
+buttons, windowed to the first page, a window around the current page and the
+last page for very long catalogs. A **🔍 Search** button on both catalog screens asks for the next
+message and filters server-side on the casefolded name *or* code (country lists
+also match their numeric code, so `22` or `+22` finds India). Queries are
+capped at 80 characters, the active query is echoed as `Search: <query>` and
+survives page changes, a no-match screen offers a retry and a clear-search
+button, and the search prompt belongs to the user who tapped it — another
+user's message never continues that session.
+
+**Lines: automatic routing + numeric operators.** After choosing an app the
+buyer picks a line. `operator` is a *numeric direct route* only, so the four
+documented automatic selection values are offered first and are sent as
+`type=` — never together with `operator`:
+
+- **🤖 Smart** (`type=smart`) — eligible operators for this exact app and
+  country, picked from live and historical delivery evidence.
+- **⚡ Auto** (`type=auto`) — lowest final price first, moving to the next
+  operator if one is unavailable.
+- **💰 Cheap** (`type=cheap`) — only the single lowest-priced eligible operator.
+- **🏆 Best** (`type=best`) — highest success-rate operator first, then the next
+  if unavailable.
+
+Each is explained on the line screen before the buyer chooses; the numeric
+buttons below them (1, 2, 3, 4, 7, 8, 9, 10) stay direct routes. Automatic
+lines read the shared country list (`getCountries` without `operator=`), fall
+back to the numeric catalog operator if a deployment rejects that, and are
+stored on the order as `route` / `route_type` with `operator` left empty; the
+buyer-facing screens and the admin order detail name the line
+(`Line: ⚡ Auto` vs `Line: Operator 3`). Admins can switch any line — automatic
+type or numeric operator — on/off from `/otpadmin → ⚙️ Settings → 📡 Lines`,
+which applies to new purchases immediately and invalidates outstanding quotes.
+
+**Operator-specific service codes.** A code from `getServices` is not routable
+on every line: `getPricesV3` can answer `BAD_SERVICE` (or `BAD_OPERATOR` /
+`BAD_COUNTRY` / `BAD_TYPE`) for a code that works elsewhere — for example
+WhatsApp `tss` on operator 9. The storefront never shows that raw token to a
+buyer. Instead it probes every other enabled line — automatic types and numeric
+operators — in parallel (`asyncio.gather` over live `getPricesV3` calls), keeps
+only the lines that return positive stock through `price_options`, and offers
+them as buttons (automatic types price identically in most deployments, so only
+the first of each distinct price/stock is offered instead of four duplicates).
+Probe results, including rejections, are remembered per app+country for
+`ROUTE_PROBE_TTL` so a known-dead combination is not re-probed on every tap.
+Tapping a line re-prices live and shows the normal **Confirm OTP Purchase**
+quote (still `retail_price` + a `settings_version` stamp, so a markup or line
+change invalidates it). When no other line has stock the buyer gets a plain
+message — “\<App\> is not available on \<Line\> for \<Country\>. Try another
+app, operator or country.” — and **no order is created and no wallet debit
+happens**. Every probe uses the shared client, so each raw provider body still
+reaches the admin log (never the API key), and `/otpadmin → 🛠 Provider Tools`
+explains these routing codes.
+
+**maxPrice and buy-time validation.** Because the catalog is cached, the buy
+step is the only live check — and it runs *before* any money moves:
+`getPricesV3` is called once more for the exact selection, and the purchase is
+refused with a plain message (no order, no debit, no `getNumber`) when the line
+is no longer routable, when stock is gone, or when the provider price rose above
+the quote — the buyer is told the new ₹ price and asked to confirm it. A price
+that stayed equal or dropped still buys at the confirmed price. Every allocation
+then sends **`maxPrice` = the quoted provider cost** (`operator=` for a numeric
+route *or* `type=` for automatic routing, plus `providerIds` when the live quote
+returned them), so the provider can never cut more than the buyer paid for; the
+live cost at buy time is stored as `live_cost` next to `cost` and both are shown
+on the admin order detail screen.
 
 Configure the TemporaSMS API key from **`/otpadmin`** (or **Admin → 📲 OTP
 Services → 🔑 API Key**) in a private chat: the key message is deleted, the key
@@ -89,18 +163,22 @@ the project's fixed ₹100/USD; verify the account currency and set a margin
 before launch. Existing wallet balances are used; no new payment gateway is
 required.
 
-The OTP admin panel also provides: service ON/OFF, per-operator switches
-(1, 2, 3, 4, 7, 8, 9, 10), popular-app ordering and per-app visibility,
-provider tools (connection test / key validation, balance, catalog-cache
-refresh), and a paginated orders dashboard (waiting / completed /
+The OTP admin panel also provides: service ON/OFF, per-line switches (the
+automatic routing types `smart` / `auto` / `cheap` / `best` and the numeric
+operators 1, 2, 3, 4, 7, 8, 9, 10), popular-app ordering and per-app
+visibility, provider tools (connection test / key validation, balance,
+catalog-cache refresh — which drops both the memory and the MongoDB catalog
+copy and refetches immediately, as does an API-key change), and a paginated
+orders dashboard (waiting / completed /
 cancelled-refunded / unpaid / allocating / review). Switching the service or
-an operator off blocks only *new* purchases — existing orders can still be
+a line off blocks only *new* purchases — existing orders can still be
 checked, cancelled and refunded. Every mutating admin action is recorded in
 `otp_admin_audit` without secrets; phone numbers and OTPs appear only on the
 admin-only order detail screen, never in lists, logs or audit records.
 
 Orders live in MongoDB `otp_orders`, navigation/quotes in `otp_views` (24-hour
-TTL), and idempotent debit/refund markers in the user document. A persistent
+TTL), the cached catalog in `otp_catalog` (24-hour TTL index, one hour of
+freshness), and idempotent debit/refund markers in the user document. A persistent
 background checker resumes waiting orders after restarts, checks approximately
 every 30 seconds (longer with many active orders), and requests cancellation after
 20 minutes. Refunds require provider cancellation confirmation. OTPs are private,

@@ -3,8 +3,11 @@ import pathlib
 import unittest
 from unittest.mock import patch
 from otp import (
-    OPERATORS, ProviderError, TemporaClient, available_operators, catalog_items,
-    fetch_services_catalog, parse_operator_ids, pick_operator, price_options, retail_price,
+    AUTO_ROUTE_TYPES, GRID_COLUMNS, OPERATORS, PER_PAGE, ProviderError, TemporaClient,
+    available_operators, catalog_items, catalog_label, fetch_services_catalog, filter_catalog,
+    is_auto_route, normalize_route, normalize_search, page_numbers, pager_buttons,
+    parse_operator_ids, pick_operator, positive_cost, price_options, retail_price, route_label,
+    route_params,
 )
 
 
@@ -50,6 +53,94 @@ class CatalogTests(unittest.TestCase):
 
     def test_missing_stock_fails_closed(self):
         self.assertEqual(price_options({'22': {'tg': {'price': .02}}}, '22', 'tg'), [])
+
+
+class CatalogPresentationTests(unittest.TestCase):
+    """Pure helpers behind the storefront search box and the numbered pager."""
+
+    def test_search_filtering_and_numbered_pager_helpers(self):
+        self.assertEqual((PER_PAGE, GRID_COLUMNS), (20, 2))   # 10 left, 10 right
+        # Queries are trimmed and capped before they are stored or rendered.
+        self.assertEqual(normalize_search("  Telegram  "), "Telegram")
+        self.assertEqual(normalize_search("x" * 500), "x" * 80)
+        self.assertEqual(normalize_search(None), "")
+        items = [("tg", "Telegram"), ("tss", "TemporaSMS WhatsApp"), ("22", "India")]
+        # Casefolded match on name OR code, keeping the snapshot indexes.
+        self.assertEqual(filter_catalog(items, "TELE"), [(0, "tg", "Telegram")])
+        self.assertEqual(filter_catalog(items, "tss"), [(1, "tss", "TemporaSMS WhatsApp")])
+        self.assertEqual(filter_catalog(items, "  "),
+                         [(0, "tg", "Telegram"), (1, "tss", "TemporaSMS WhatsApp"), (2, "22", "India")])
+        self.assertEqual(filter_catalog(items, "nothing-here"), [])
+        # Country lists additionally match a numeric query on the numeric code,
+        # so a typed prefix such as "+22" still finds country 22.
+        countries = [("22", "India"), ("0", "Russia"), ("7", "Indonesia")]
+        self.assertEqual([c for _i, c, _n in filter_catalog(countries, "22", numeric_codes=True)], ["22"])
+        self.assertEqual([c for _i, c, _n in filter_catalog(countries, "0", numeric_codes=True)], ["0"])
+        self.assertEqual([c for _i, c, _n in filter_catalog(countries, "2", numeric_codes=True)], ["22"])
+        self.assertEqual([c for _i, c, _n in filter_catalog(countries, "+22", numeric_codes=True)], ["22"])
+        self.assertEqual(filter_catalog(countries, "9", numeric_codes=True), [])
+        # App lists get no numeric matching: "+22" finds nothing there.
+        self.assertEqual(filter_catalog([("22", "India")], "+22"), [])
+        self.assertEqual(filter_catalog([("22", "India")], "22"), [(0, "22", "India")])
+        # Pager: current page is a noop marker, the others jump by number.
+        self.assertEqual(pager_buttons("TOK", 0, 1), [])
+        self.assertEqual(page_numbers(0, 1), [])
+        self.assertEqual(pager_buttons("TOK", 1, 3),
+                         [("1", "otp:page:TOK:0"), ("• 2 •", "noop"), ("3", "otp:page:TOK:2")])
+        # Very long catalogs are windowed, keeping the first and last page.
+        window = pager_buttons("TOK", 8, 40)
+        labels = [text for text, _data in window]
+        self.assertLess(len(labels), 40)
+        self.assertEqual(labels[0], "1")
+        self.assertEqual(labels[-1], "40")
+        self.assertIn("• 9 •", labels)
+        self.assertIn("…", labels)
+        self.assertTrue(all(data == "noop" or data.startswith("otp:page:TOK:") for _t, data in window))
+        self.assertLessEqual(max(len(data) for _t, data in window), 64)
+
+
+class RouteHelperTests(unittest.TestCase):
+    """Numeric direct routes vs the documented automatic selection types."""
+
+    def test_documented_automatic_routes_are_supported(self):
+        self.assertEqual(AUTO_ROUTE_TYPES, ("smart", "auto", "cheap", "best"))
+        for route in AUTO_ROUTE_TYPES:
+            self.assertTrue(is_auto_route(route))
+            # Automatic selection is sent as type= and never as operator=.
+            self.assertEqual(route_params(route), {"type": route})
+            self.assertEqual(route_params(route.upper()), {"type": route})
+        for operator in OPERATORS:
+            self.assertFalse(is_auto_route(operator))
+            self.assertEqual(route_params(operator), {"operator": operator})
+
+    def test_route_normalization_rejects_everything_else(self):
+        self.assertEqual(normalize_route(" 9 "), "9")
+        self.assertEqual(normalize_route("AUTO"), "auto")
+        self.assertEqual(normalize_route(7), "7")
+        for bad in ("", None, "0", "-1", "1.5", "BAD_SERVICE", "operator 9", "9x", True):
+            self.assertIsNone(normalize_route(bad), bad)
+
+    def test_route_labels_are_buyer_friendly(self):
+        self.assertEqual(route_label("9"), "Operator 9")
+        self.assertEqual(route_label("auto"), "⚡ Auto")
+        self.assertEqual(route_label("smart"), "🤖 Smart")
+        self.assertEqual(route_label("cheap"), "💰 Cheap")
+        self.assertEqual(route_label("best"), "🏆 Best")
+
+    def test_catalog_labels_fit_telegram_buttons(self):
+        self.assertEqual(catalog_label("Telegram"), "Telegram")
+        self.assertEqual(len(catalog_label("x" * 200)), 30)
+        # Multi-byte names are trimmed by bytes, never mid-character.
+        cyrillic = catalog_label("Т" * 100)
+        self.assertLessEqual(len(cyrillic.encode("utf-8")), 64)
+        self.assertTrue(cyrillic)
+        self.assertEqual(catalog_label("  WhatsApp  "), "WhatsApp")
+
+    def test_positive_cost_gates_every_allocation(self):
+        self.assertEqual(positive_cost(0.1), 0.1)
+        self.assertEqual(positive_cost("2.99"), 2.99)
+        for bad in (0, -1, None, "", "abc", float("nan"), float("inf")):
+            self.assertIsNone(positive_cost(bad), bad)
 
 
 class OperatorParsingTests(unittest.TestCase):
@@ -228,4 +319,12 @@ class WiringTests(unittest.TestCase):
         self.assertLess(source.index('text="📲 Buy OTPs (All Apps)"'), source.index('callback_data="smm_open")])'))
 
     def test_callback_payload_with_object_id_fits_telegram(self):
-        self.assertLess(len('otp:select:' + 'a'*24 + ':9999'), 64)
+        samples = [
+            'otp:select:' + 'a' * 24 + ':9999',
+            'otp:page:' + 'a' * 24 + ':9999',
+            'otp:search:' + 'a' * 24,
+            'otp:searchclear:' + 'a' * 24,
+            'otp:alt:' + 'a' * 24 + ':10',
+        ]
+        for data in samples:
+            self.assertLessEqual(len(data.encode()), 64, data)

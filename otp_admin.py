@@ -38,7 +38,10 @@ from bson import ObjectId
 from bson.errors import InvalidId
 
 import otp_settings as cfg
-from otp import ProviderError, TemporaClient, catalog_items, fetch_services_catalog
+from otp import (
+    CATALOG_TTL, ROUTE_DESCRIPTIONS, ROUTE_LABELS, ProviderError, TemporaClient, catalog_items,
+    fetch_services_catalog, normalize_route, route_label,
+)
 from rich_messages import premium_button, safe_edit_or_send
 
 log = logging.getLogger(__name__)
@@ -70,11 +73,37 @@ _PROVIDER_FAILURES = {
     "NO_BALANCE": "Provider account balance is empty (NO_BALANCE).",
     "TOO_MANY_REQUESTS": "Provider rate limit hit (TOO_MANY_REQUESTS). Wait and retry.",
     "NO_OPERATORS": "The provider returned no enabled numeric operator. Enable a matching operator or retry.",
+    # Routing rejections: a getServices code is not valid on every line
+    # (automatic routing type or numeric operator), country or combination.
+    # The storefront answers these by probing every other enabled line and
+    # offering only the ones with live stock.
+    "BAD_SERVICE": "That service code is not routable on this line/country (BAD_SERVICE). "
+                   "TemporaSMS codes are operator-specific — the storefront offers the enabled "
+                   "lines (automatic types and numeric operators) that do have live stock "
+                   "instead of showing this code.",
+    "BAD_OPERATOR": "The provider rejected this operator (BAD_OPERATOR). getServices/getPricesV3 "
+                    "need a numeric operator the provider currently offers.",
+    "BAD_TYPE": "The provider rejected this automatic routing type (BAD_TYPE). Only "
+                "smart/auto/cheap/best are accepted as type=; disable it under 📡 Lines.",
+    "BAD_COUNTRY": "The provider rejected this country for the selected service/line (BAD_COUNTRY).",
+    "NO_NUMBERS": "Out of stock for that service/country/line (NO_NUMBERS).",
 }
 
 
 def friendly_provider_error(exc: ProviderError) -> str:
     return _PROVIDER_FAILURES.get(exc.code or "", str(exc) or "Provider request failed.")
+
+
+def order_line(order):
+    """Buyer-facing name of the line an order was bought on.
+
+    Automatic routing stores ``route_type`` (smart/auto/cheap/best) and no
+    numeric operator; a direct route stores the operator id.  Legacy orders
+    (created before automatic routing) only carry ``operator``.
+    """
+    order = order or {}
+    route = normalize_route(order.get("route") or order.get("route_type") or order.get("operator"))
+    return route_label(route) if route else "—"
 
 
 class OtpAdminStates(StatesGroup):
@@ -230,6 +259,7 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
             f"• <b>API Key:</b> <code>{escape(masked)}</code> ({escape(source)})<br>"
             f"• <b>Markup:</b> <code>{e['markup']:g}%</code> ({escape(e['markup_source'])})<br>"
             f"• <b>USD→INR:</b> <code>₹{e['rate']:g}</code> (global fixed rate)<br>"
+            f"• <b>Auto routing ON:</b> <code>{', '.join(e['auto_types']) or 'none'}</code><br>"
             f"• <b>Operators enabled:</b> <code>{', '.join(e['operators']) or 'none'}</code><br>"
             f"• <b>Waiting orders:</b> <code>{counts['waiting']}</code> · "
             f"<b>Need attention:</b> <code>{attention}</code>"
@@ -274,7 +304,7 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
     async def render_settings(message):
         e = eff()
         raw = e["raw"]
-        disabled = [op for op in cfg.ALL_OPERATORS if op not in e["operators"]]
+        disabled = [route for route in cfg.ALL_ROUTES if route not in e["routes"]]
         text = (
             "<h2>⚙️ OTP Service Settings</h2>"
             "<blockquote>"
@@ -284,13 +314,13 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
             + (f" · env fallback: <code>{env_markup:g}%</code>" if e["markup_source"] == "database" else "") + "<br>"
             f"• <b>USD→INR rate:</b> <code>₹{e['rate']:g}</code> — the bot-wide fixed "
             "rate from config; it is not changed here.<br>"
-            f"• <b>Operators OFF:</b> <code>{', '.join(disabled) or 'none'}</code><br>"
+            f"• <b>Lines OFF:</b> <code>{', '.join(disabled) or 'none'}</code><br>"
             f"• <b>Hidden apps:</b> <code>{len(cfg.hidden_apps(raw))}</code> · "
             f"<b>Popular (custom):</b> <code>{len(cfg.popular_apps(raw))}</code>"
             "</blockquote>"
-            "<p>Turning the service or an operator OFF blocks <b>new</b> purchases "
-            "only. Price changes invalidate outstanding quotes, so buyers always "
-            "re-confirm the current price.</p>"
+            "<p>Turning the service, an automatic routing type or an operator OFF blocks "
+            "<b>new</b> purchases only. Price changes invalidate outstanding quotes, so "
+            "buyers always re-confirm the current price.</p>"
         )
         rows = [
             [btn(f"{'🔴 Switch Service OFF' if e['enabled'] else '🟢 Switch Service ON'}", "otpa:togsvc")],
@@ -298,24 +328,44 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
         ]
         if e["markup_source"] == "database":
             rows.append([btn("♻️ Reset Markup to Environment", "otpa:markupreset")])
-        rows.append([btn("📡 Operators", "otpa:ops"), btn("⭐ Popular & Hidden", "otpa:pop")])
+        rows.append([btn("📡 Lines & Operators", "otpa:ops"), btn("⭐ Popular & Hidden", "otpa:pop")])
         rows.append(back_home())
         await show(message, text, rows)
 
     async def render_operators(message):
         e = eff()
+        # premium_button turns the leading ✅/❌ into the button icon, so the
+        # state is repeated as text (ON/OFF) and stays readable either way.
+        auto_rows = []
+        for i in range(0, len(cfg.AUTO_ROUTE_TYPES), 2):
+            auto_rows.append([
+                btn(f"{'✅' if route in e['auto_types'] else '❌'} {ROUTE_LABELS[route]}: "
+                    f"{'ON' if route in e['auto_types'] else 'OFF'}", f"otpa:op:{route}")
+                for route in cfg.AUTO_ROUTE_TYPES[i:i + 2]
+            ])
         rows = []
         for i in range(0, len(cfg.ALL_OPERATORS), 2):
             rows.append([
-                btn(f"{'✅' if op in e['operators'] else '❌'} Operator {op}", f"otpa:op:{op}")
+                btn(f"{'✅' if op in e['operators'] else '❌'} Operator {op}: "
+                    f"{'ON' if op in e['operators'] else 'OFF'}", f"otpa:op:{op}")
                 for op in cfg.ALL_OPERATORS[i:i + 2]
             ])
+        hints = "".join(
+            f"<br>• <b>{escape(ROUTE_LABELS[route])}</b> (<code>type={route}</code>) — "
+            f"{escape(ROUTE_DESCRIPTIONS[route])}" for route in cfg.AUTO_ROUTE_TYPES)
         rows.append([btn("⬅️ Settings", "otpa:settings")])
         rows.append(back_home())
         await show(message,
-                   "<h2>📡 Operators</h2><p>Tap to enable/disable. Disabled operators "
-                   "disappear from new purchases immediately; existing orders are unaffected.</p>",
-                   rows)
+                   "<h2>📡 Lines</h2><p>Tap to enable/disable. Disabled lines disappear from "
+                   "new purchases immediately; existing orders are unaffected.</p>"
+                   "<p><b>Automatic routing</b> is sent to the provider as <code>type=</code>; it "
+                   "picks the operator for the submitted app and country:"
+                   f"{hints}</p>"
+                   "<p><b>Operators</b> below are numeric direct routes sent as "
+                   "<code>operator=</code>. The two parameters are never combined, and every "
+                   "allocation also carries <code>maxPrice</code> so the provider cannot charge "
+                   "more than the quoted cost.</p>",
+                   auto_rows + rows)
 
     async def render_tools(message, note=None):
         e = eff()
@@ -324,8 +374,17 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
             "<h2>🛠 Provider Tools</h2>"
             f"<blockquote>Active key: <code>{escape(masked)}</code> ({escape(source)})</blockquote>"
             + (f"<p>{note}</p>" if note else
-               "<p>Test the key, check the provider balance, or refresh the "
-               "services/countries catalog cache (normally cached for 5 minutes).</p>")
+               f"<p>Test the key, check the provider balance, or refresh the catalog cache. "
+               f"Services, countries and operators are fetched <b>once</b> and reused for "
+               f"<code>{CATALOG_TTL // 60}</code> minutes (memory + a MongoDB copy that survives "
+               f"a restart); only pricing and allocation stay live.</p>")
+            + "<p><i>Service codes are line-specific: a code the provider rejects with "
+              "<code>BAD_SERVICE</code>, <code>BAD_COUNTRY</code> or <code>BAD_TYPE</code> on one "
+              "line is answered in the storefront by probing every other enabled line (automatic "
+              "types and numeric operators) and offering only the ones with live stock. Every "
+              "purchase is re-validated live and every allocation sends <code>maxPrice</code> = "
+              "the quoted provider cost, so the provider can never cut more than the buyer paid for. "
+              "Each probe's raw response still lands in this admin log.</i></p>"
         )
         rows = [
             [btn("🧪 Test Connection / Validate Key", "otpa:test")],
@@ -389,9 +448,12 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
             f"• <b>User ID:</b> <code>{order.get('user_id')}</code><br>",
             f"• <b>App:</b> {escape(str(order.get('service_name')))} (<code>{escape(str(order.get('service')))}</code>)<br>",
             f"• <b>Country:</b> {escape(str(order.get('country_name')))} (<code>{escape(str(order.get('country')))}</code>) · "
-            f"<b>Operator:</b> <code>{escape(str(order.get('operator')))}</code><br>",
+            f"<b>Line:</b> {escape(order_line(order))}<br>",
             f"• <b>Sell price:</b> <code>₹{float(order.get('price', 0)):.2f}</code> · "
             f"<b>Provider cost:</b> <code>${float(order.get('cost', 0))}</code>"
+            + (f" · <b>Live at buy:</b> <code>${float(order['live_cost'])}</code>"
+               if order.get("live_cost") is not None else "")
+            + f" · <b>maxPrice sent:</b> <code>${float(order.get('cost', 0))}</code>"
             + (f" · <b>Markup:</b> <code>{float(order['markup']):g}%</code>" if order.get("markup") is not None else "") + "<br>",
             f"• <b>Activation ID:</b> <code>{escape(str(order.get('activation_id') or '—'))}</code><br>",
             f"• <b>Created:</b> {_fmt_dt(order.get('created_at'))}<br>",
@@ -571,10 +633,14 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
             await audit(admin_id, "service_toggled", enabled=new_val)
             return await render_settings(msg)
         if action == "op":
-            op = parts[2]
-            enabled_now = op in eff()["operators"]
-            cfg.set_operator_enabled(settings_col, op, not enabled_now, admin_id)
-            await audit(admin_id, "operator_toggled", operator=op, enabled=not enabled_now)
+            # One of the automatic routing types (smart/auto/cheap/best) or a
+            # numeric direct operator; anything else is ignored, never sent on.
+            route = normalize_route(parts[2] if len(parts) > 2 else "")
+            if route is None or route not in cfg.ALL_ROUTES:
+                return await render_operators(msg)
+            enabled_now = route in eff()["routes"]
+            cfg.set_operator_enabled(settings_col, route, not enabled_now, admin_id)
+            await audit(admin_id, "operator_toggled", operator=route, enabled=not enabled_now)
             return await render_operators(msg)
         if action == "markup":
             e = eff()
