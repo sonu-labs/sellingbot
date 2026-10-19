@@ -76,17 +76,21 @@ _PROVIDER_FAILURES = {
     # Routing rejections: a getServices code is not valid on every line
     # (automatic routing type or numeric operator), country or combination.
     # The storefront answers these by probing every other enabled line and
-    # offering only the ones with live stock.
+    # offering only the ones with live stock. These are handled automatically
+    # and do not indicate a failure — shown as ℹ️ expected in the summary log.
     "BAD_SERVICE": "That service code is not routable on this line/country (BAD_SERVICE). "
                    "TemporaSMS codes are operator-specific — the storefront offers the enabled "
                    "lines (automatic types and numeric operators) that do have live stock "
-                   "instead of showing this code.",
+                   "instead of showing this code. (Handled probe — ℹ️ expected)",
     "BAD_OPERATOR": "The provider rejected this operator (BAD_OPERATOR). getServices/getPricesV3 "
-                    "need a numeric operator the provider currently offers.",
+                    "need a numeric operator the provider currently offers. (Handled probe — ℹ️ expected)",
     "BAD_TYPE": "The provider rejected this automatic routing type (BAD_TYPE). Only "
-                "smart/auto/cheap/best are accepted as type=; disable it under 📡 Lines.",
-    "BAD_COUNTRY": "The provider rejected this country for the selected service/line (BAD_COUNTRY).",
+                "smart/auto/cheap/best are accepted as type=; disable it under 📡 Lines. (Handled probe — ℹ️ expected)",
+    "BAD_COUNTRY": "The provider rejected this country for the selected service/line (BAD_COUNTRY). (Handled probe — ℹ️ expected)",
     "NO_NUMBERS": "Out of stock for that service/country/line (NO_NUMBERS).",
+    "WRONG_MAX_PRICE": "Provider rejected maxPrice — real price higher than quoted (WRONG_MAX_PRICE). "
+                       "Order was refunded exactly once, corrected price stored for next quote, and admin sees cost vs live_cost vs reported.",
+    "BAD_MAX_PRICE": "Provider rejected the maxPrice limit (BAD_MAX_PRICE). Order was refunded, admin sees cost vs reported.",
 }
 
 
@@ -127,32 +131,76 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
     def eff():
         return cfg.effective_settings(settings_col, env_api_key, env_markup, rate)
 
-    async def log_provider_response(action, params, raw, status):
+    async def log_provider_response(action, params, raw, status, purpose=None):
         """Forward the exact provider body to the configured admin log.
 
         API credentials are never part of ``params``. Large catalogs/status
         payloads are attached as a UTF-8 text file to avoid Telegram message
         length truncation, preserving the complete unmodified response.
+        Purpose tags (catalog, line probe, quote, allocation, etc.) are
+        rendered in the header so probe sweeps are visually distinct.
+        Expected routing rejections in probes are shown as ℹ️ expected vs ⚠️ failed.
         """
         if not admin_log_id:
             return
+        if purpose == "line probe":
+            return
         safe_params = {k: v for k, v in params.items() if k.lower() not in {"api_key", "key", "token"}}
+        purpose_tag = f" · <i>{escape(str(purpose))}</i>" if purpose else ""
+        raw_str = str(raw)
+        is_expected = any(code in raw_str for code in ("BAD_SERVICE", "BAD_OPERATOR", "BAD_COUNTRY", "BAD_TYPE"))
+        if purpose in ("quote", "allocation", "buy validation"):
+            icon = "⚠️"
+        elif purpose in ("catalog", "status refresh"):
+            icon = "📡"
+        else:
+            icon = "🌐"
+        if is_expected and purpose not in ("allocation", "quote"):
+            icon = "ℹ️"
         metadata = (
-            "📡 <b>TemporaSMS API</b>\n"
-            f"Action: <code>{escape(str(action))}</code> · HTTP <code>{int(status)}</code>\n"
-            f"Params: <code>{escape(str(safe_params)[:700])}</code>\n"
+            f"{icon} <b>TemporaSMS API</b>{purpose_tag}<br>"
+            f"Action: <code>{escape(str(action))}</code> · HTTP <code>{int(status)}</code><br>"
+            f"Params: <code>{escape(str(safe_params)[:700])}</code><br>"
         )
         body = str(raw)
         if len(body) <= 2800:
-            await bot.send_message(admin_log_id, metadata + "Raw response:\n<code>" + escape(body or "(empty)") + "</code>")
+            await bot.send_message(admin_log_id, metadata + "Raw response:<br><code>" + escape(body or "(empty)") + "</code>")
             return
         filename = f"temporasms_{str(action)[:40]}.txt"
         document = BufferedInputFile(body.encode("utf-8"), filename=filename)
         await bot.send_document(admin_log_id, document, caption=metadata + "Raw response attached in full.")
 
+    async def log_probe_summary(service, country, summary_text, attachment_text, raw_map):
+        if not admin_log_id:
+            return
+        has_real_failure = False
+        for route, (raw_val, _, code) in (raw_map or {}).items():
+            if code and code not in ("BAD_SERVICE", "BAD_OPERATOR", "BAD_COUNTRY", "BAD_TYPE"):
+                has_real_failure = True
+        icon = "⚠️" if has_real_failure else "ℹ️"
+        header = f"{icon} <b>TemporaSMS Line Probe</b> · <i>line probe</i><br>"
+        body = f"{escape(summary_text)}<br>"
+        full_text = f"Service: {service} Country: {country}\n" + attachment_text + "\n\nRaw map:\n" + str(raw_map)
+        if len(attachment_text) > 0:
+            filename = f"temporasms_line_probe_{service}_{country}.txt"
+            document = BufferedInputFile(full_text.encode("utf-8"), filename=filename)
+            await bot.send_document(admin_log_id, document, caption=header + body)
+        else:
+            await bot.send_message(admin_log_id, header + body)
+
     setter = getattr(api, "set_response_logger", None)
     if setter:
         setter(log_provider_response)
+    if "set_probe_summary_logger" in otp_ctx:
+        try:
+            otp_ctx["set_probe_summary_logger"](log_probe_summary)
+        except Exception:
+            pass
+    else:
+        try:
+            api._probe_summary_logger = log_probe_summary
+        except Exception:
+            pass
 
     def settings():
         return cfg.get_settings(settings_col)
@@ -455,6 +503,10 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
                if order.get("live_cost") is not None else "")
             + f" · <b>maxPrice sent:</b> <code>${float(order.get('cost', 0))}</code>"
             + (f" · <b>Markup:</b> <code>{float(order['markup']):g}%</code>" if order.get("markup") is not None else "") + "<br>",
+            f"• <b>Live cost:</b> <code>${float(order.get('live_cost', order.get('cost', 0))):g}</code> · "
+            f"<b>Quoted cost:</b> <code>${float(order.get('cost', 0)):g}</code>"
+            + (f" · <b>Provider reported:</b> <code>${float(order.get('provider_reported_price')):g}</code> ({escape(str(order.get('provider_reported_code','')))})"
+               if order.get("provider_reported_price") is not None else "") + "<br>",
             f"• <b>Activation ID:</b> <code>{escape(str(order.get('activation_id') or '—'))}</code><br>",
             f"• <b>Created:</b> {_fmt_dt(order.get('created_at'))}<br>",
             f"• <b>Updated:</b> {_fmt_dt(order.get('updated_at') or order.get('created_at'))}",
