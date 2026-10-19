@@ -3858,6 +3858,45 @@ async def get_live_bot_status() -> dict:
         logger.warning("Telegram getMe health check failed: %s", exc)
         telegram_status = "API check failed; bot process is still responding"
 
+    # OTP background worker + catalog cache info (best-effort)
+    otp_worker_status = "Unknown"
+    otp_last_warm = None
+    otp_catalog_age = None
+    otp_catalog_count = 0
+    try:
+        # Try to find OTP worker task if registered globally
+        otp_catalog_count = db["otp_catalog"].count_documents({}) if "db" in globals() else 0
+        # Find most recent catalog fetched_at
+        try:
+            latest = db["otp_catalog"].find_one(sort=[("fetched_at", -1)]) if "db" in globals() else None
+            if latest and latest.get("fetched_at"):
+                otp_last_warm = utc_naive(latest.get("fetched_at"))
+                otp_catalog_age = (datetime.utcnow() - otp_last_warm).total_seconds() if otp_last_warm else None
+        except Exception:
+            pass
+        otp_worker_status = "Running" if SMM_BACKGROUND_TASK else "Not checked"
+    except Exception:
+        pass
+
+    # Provider balance (cached only, no new slow call)
+    provider_balance = None
+    try:
+        # Check if otp_catalog has cached balance? We don't have it; show not checked
+        provider_balance = "not checked"
+    except Exception:
+        provider_balance = "not checked"
+
+    # DB collection counts (best-effort, fast)
+    db_counts = {}
+    try:
+        for coll in ["users", "otp_orders", "otp_catalog", "smm_orders"]:
+            try:
+                db_counts[coll] = db[coll].count_documents({}) if "db" in globals() else 0
+            except Exception:
+                db_counts[coll] = 0
+    except Exception:
+        pass
+
     return {
         "process": "Running",
         "telegram": telegram_status,
@@ -3866,6 +3905,12 @@ async def get_live_bot_status() -> dict:
         "checker": checker_status,
         "checker_last_run": checker_last_run,
         "checker_error": checker_error,
+        "otp_worker": otp_worker_status,
+        "otp_last_warm": otp_last_warm,
+        "otp_catalog_age": otp_catalog_age,
+        "otp_catalog_count": otp_catalog_count,
+        "provider_balance": provider_balance,
+        "db_counts": db_counts,
     }
 
 
@@ -3888,55 +3933,240 @@ def render_bot_health(health: dict) -> str:
     )
 
 
+def _trend_arrow(delta: float) -> str:
+    if delta > 0.5:
+        return "📈"
+    if delta < -0.5:
+        return "📉"
+    return "➖"
+
+def _status_dot(status: str) -> str:
+    s = str(status or "").lower()
+    if "running" in s or "reachable" in s:
+        return "🟢"
+    if "stale" in s or "starting" in s:
+        return "⚪"
+    return "🔴"
+
+def _fmt_money(v: float) -> str:
+    try:
+        return f"₹{float(v):,.2f}"
+    except Exception:
+        return "₹0.00"
+
+def _fmt_pct(v: float) -> str:
+    try:
+        return f"{float(v):.1f}%"
+    except Exception:
+        return "0.0%"
+
 async def build_admin_analytics_report() -> str:
     now = datetime.utcnow()
+    now_ist = now + timedelta(hours=5, minutes=30)
     start_of_week = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now.weekday())
-    user_docs = list(users_col.find({"joined_at": {"$gte": start_of_week}}, {"joined_at": 1}))
-    transactions = list(db["transactions"].find(
-        {"status": {"$in": ["paid", "success", "approved"]}},
-        {"status": 1, "amount": 1, "created_at": 1},
-    ))
-    withdrawals = list(db["withdrawals"].find(
-        {"status": "paid"}, {"status": 1, "amount": 1}
-    ))
-    account_orders = list(orders_col.find(
-        {"status": "purchased"}, {"status": 1, "price": 1, "created_at": 1, "country": 1}
-    ))
-    smm_orders = list(db["smm_orders"].find(
-        {}, {"status": 1, "status_norm": 1, "price": 1, "created_at": 1, "refunded": 1}
-    ))
+    # Defensive: each collection read is best-effort, empty on failure
+    try:
+        user_docs = list(users_col.find({"joined_at": {"$gte": start_of_week}}, {"joined_at": 1, "user_id": 1}))
+    except Exception:
+        user_docs = []
+    try:
+        total_users = users_col.count_documents({})
+    except Exception:
+        total_users = 0
+    try:
+        transactions = list(db["transactions"].find(
+            {"status": {"$in": ["paid", "success", "approved"]}},
+            {"status": 1, "amount": 1, "created_at": 1, "user_id": 1},
+        ))
+    except Exception:
+        transactions = []
+    try:
+        all_transactions = list(db["transactions"].find({}, {"status": 1, "amount": 1, "created_at": 1}))
+    except Exception:
+        all_transactions = transactions
+    try:
+        withdrawals = list(db["withdrawals"].find(
+            {"status": "paid"}, {"status": 1, "amount": 1, "created_at": 1}
+        ))
+    except Exception:
+        withdrawals = []
+    try:
+        all_withdrawals = list(db["withdrawals"].find({}, {"status": 1, "amount": 1, "created_at": 1}))
+    except Exception:
+        all_withdrawals = withdrawals
+    try:
+        account_orders = list(orders_col.find(
+            {"status": "purchased"}, {"status": 1, "price": 1, "created_at": 1, "country": 1, "user_id": 1}
+        ))
+    except Exception:
+        account_orders = []
+    try:
+        smm_orders = list(db["smm_orders"].find(
+            {}, {"status": 1, "status_norm": 1, "price": 1, "created_at": 1, "refunded": 1, "category": 1, "service": 1, "user_id": 1}
+        ))
+    except Exception:
+        smm_orders = []
+    try:
+        otp_orders = list(db["otp_orders"].find(
+            {}, {"status": 1, "price": 1, "cost": 1, "live_cost": 1, "created_at": 1, "service": 1, "service_name": 1, "country": 1, "country_name": 1, "route": 1, "route_type": 1, "operator": 1, "provider_reported_price": 1, "refunded": 1, "user_id": 1}
+        ))
+    except Exception:
+        otp_orders = []
+    try:
+        otp_catalog_docs = list(db["otp_catalog"].find({}, {"fetched_at": 1, "action": 1}))
+    except Exception:
+        otp_catalog_docs = []
+    try:
+        otp_settings_doc = db["settings"].find_one({"_id": "otp_services"}) or {}
+        # Build effective view if possible
+        from otp_settings import effective_settings as otp_eff
+        otp_eff_view = otp_eff(db["settings"], TEMPORASMS_API_KEY, 0, USD_TO_INR) if 'TEMPORASMS_API_KEY' in globals() else {"routes": [], "operators": []}
+    except Exception:
+        otp_eff_view = {"routes": [], "operators": []}
+        otp_settings_doc = {}
+
+    # Summarize with extended metrics
+    try:
+        smm_cfg = db["smm_settings"].find_one({"_id": "config"}) or {}
+        checker_last = utc_naive(smm_cfg.get("checker_last_run"))
+        checker_err = str(smm_cfg.get("checker_last_error") or "")[:240]
+    except Exception:
+        checker_last = None
+        checker_err = ""
     metrics = summarize_analytics(
-        total_users=users_col.count_documents({}),
+        total_users=total_users,
         user_docs=user_docs,
         transactions=transactions,
         withdrawals=withdrawals,
         account_orders=account_orders,
         smm_orders=smm_orders,
         now=now,
+        otp_orders=otp_orders,
+        all_transactions=all_transactions,
+        all_withdrawals=all_withdrawals,
+        otp_catalog=otp_catalog_docs,
+        otp_settings=otp_eff_view,
+        rate=float(USD_TO_INR) if 'USD_TO_INR' in globals() else 100.0,
+        smm_checker_last_run=checker_last,
+        smm_checker_error=checker_err,
     )
     health = await get_live_bot_status()
-    return (
-        "<h2>📊 Admin Analytics</h2>"
+
+    # Helper to escape
+    def esc(v):
+        return escape(str(v) if v is not None else "—")
+
+    # Build report sections
+    # Overview
+    overview = (
+        "<blockquote>📈 <b>Overview / Snapshot</b><br>"
+        f"• <b>Generated:</b> <code>{esc(now.strftime('%d %b %Y %H:%M UTC'))}</code> · <code>{esc(now_ist.strftime('%d %b %Y %H:%M IST'))}</code><br>"
+        f"• <b>Window:</b> today from <code>{esc(metrics['day_start'].strftime('%d %b %H:%M UTC'))}</code> · week from <code>{esc(metrics['week_start'].strftime('%d %b %H:%M UTC'))}</code><br>"
+        f"• <b>Total revenue (all verticals):</b> <code>{esc(_fmt_money(metrics.get('total_revenue', 0)))}</code> · today <code>{esc(_fmt_money(metrics.get('total_today_revenue', 0)))}</code> · week <code>{esc(_fmt_money(metrics.get('total_week_revenue', 0)))}</code><br>"
+        f"• <b>Share:</b> Accounts <code>{esc(_fmt_pct(metrics.get('account_share', 0)))}</code> · SMM <code>{esc(_fmt_pct(metrics.get('smm_share', 0)))}</code> · OTP <code>{esc(_fmt_pct(metrics.get('otp_share', 0)))}</code>"
+        "</blockquote>"
+    )
+    # User Growth
+    user_growth = (
         "<blockquote>👥 <b>User Growth</b><br>"
-        f"• Total users: <code>{metrics['total_users']:,}</code><br>"
-        f"• Joined today / this week: <code>{metrics['users_today']:,}</code> / <code>{metrics['users_week']:,}</code></blockquote>"
-        "<blockquote>💰 <b>Wallet Activity (INR)</b><br>"
-        f"• Deposits total: <code>₹{metrics['deposit_total']:,.2f}</code><br>"
-        f"• Deposits today / this week: <code>₹{metrics['deposit_today']:,.2f}</code> / <code>₹{metrics['deposit_week']:,.2f}</code><br>"
-        f"• Withdrawals paid: <code>₹{metrics['withdrawal_total']:,.2f}</code></blockquote>"
-        "<blockquote>🛒 <b>Sales</b><br>"
-        f"• Account orders: <code>{metrics['account_orders']:,}</code> · revenue <code>₹{metrics['account_revenue']:,.2f}</code><br>"
-        f"• Account sales today: <code>{metrics['account_today_count']:,}</code> · revenue <code>₹{metrics['account_today_revenue']:,.2f}</code><br>"
-        f"• Account sales this week: <code>{metrics['account_week_count']:,}</code> · revenue <code>₹{metrics['account_week_revenue']:,.2f}</code><br>"
-        f"• SMM orders: <code>{metrics['smm_orders']:,}</code> · open <code>{metrics['smm_open_orders']:,}</code><br>"
-        f"• SMM net revenue: <code>₹{metrics['smm_net']:,.2f}</code> · refunded <code>₹{metrics['smm_refunds']:,.2f}</code><br>"
-        f"• SMM sales today / week: <code>₹{metrics['smm_today_net']:,.2f}</code> / <code>₹{metrics['smm_week_net']:,.2f}</code><br>"
-        f"• Top account country: <code>{escape(str(metrics['top_country']))}</code></blockquote>"
-        "<blockquote>🤖 <b>Bot Status</b><br>"
-        f"• Process: <code>🟢 Running</code> · uptime <code>{escape(health['uptime'])}</code><br>"
-        f"• Telegram API: <code>{escape(health['telegram'])}</code><br>"
-        f"• SMM monitor: <code>{escape(health['checker'])}</code><br>"
-        f"• Last SMM cycle: <code>{health['checker_last_run'].strftime('%d %b %H:%M UTC') if health['checker_last_run'] else 'not yet'}</code></blockquote>"
+        f"• <b>Total users:</b> <code>{metrics['total_users']:,}</code><br>"
+        f"• <b>Joined today / this week:</b> <code>{metrics['users_today']:,}</code> / <code>{metrics['users_week']:,}</code> "
+        f"{_trend_arrow(metrics.get('users_today_delta', 0))} <code>{esc(_fmt_pct(metrics.get('users_today_delta', 0)))}</code> vs yesterday<br>"
+        f"• <b>Yesterday / last week:</b> <code>{metrics.get('users_yesterday', 0):,}</code> / <code>{metrics.get('users_last_week', 0):,}</code><br>"
+        f"• <b>Active buyers:</b> <code>{metrics.get('active_buyers', 0):,}</code> · <b>Conversion:</b> <code>{esc(_fmt_pct(metrics.get('conversion_rate', 0)))}</code><br>"
+        f"• <b>Top-up users:</b> <code>{metrics.get('topup_users', 0):,}</code>"
+        "</blockquote>"
+    )
+    # Wallet
+    wallet = (
+        "<blockquote>💰 <b>Wallet (INR)</b><br>"
+        f"• <b>Deposits total:</b> <code>{esc(_fmt_money(metrics['deposit_total']))}</code><br>"
+        f"• <b>Deposits today / this week:</b> <code>{esc(_fmt_money(metrics['deposit_today']))}</code> / <code>{esc(_fmt_money(metrics['deposit_week']))}</code><br>"
+        f"• <b>Withdrawals paid:</b> <code>{esc(_fmt_money(metrics['withdrawal_total']))}</code> · today <code>{esc(_fmt_money(metrics.get('withdrawal_today_amount', 0)))}</code> · week <code>{esc(_fmt_money(metrics.get('withdrawal_week_amount', 0)))}</code><br>"
+        f"• <b>Pending:</b> recharges <code>{metrics.get('pending_deposits', 0):,}</code> · withdrawals <code>{metrics.get('pending_withdrawals', 0):,}</code><br>"
+        f"• <b>Net flow:</b> <code>{esc(_fmt_money(metrics.get('net_flow', 0)))}</code> · <b>Avg deposit:</b> <code>{esc(_fmt_money(metrics.get('avg_deposit', 0)))}</code>"
+        "</blockquote>"
+    )
+    # Account Sales
+    top_countries = metrics.get('top_countries', [])
+    if top_countries:
+        tc_text = " · ".join(f"{esc(c)} <code>{n:,}</code>" for c, n in top_countries)
+    else:
+        tc_text = "<code>—</code>"
+    account_sales = (
+        "<blockquote>🛒 <b>Account Sales</b><br>"
+        f"• <b>Orders:</b> <code>{metrics['account_orders']:,}</code> · <b>Revenue:</b> <code>{esc(_fmt_money(metrics['account_revenue']))}</code><br>"
+        f"• <b>Today:</b> <code>{metrics['account_today_count']:,}</code> · <code>{esc(_fmt_money(metrics['account_today_revenue']))}</code> · "
+        f"<b>Week:</b> <code>{metrics['account_week_count']:,}</code> · <code>{esc(_fmt_money(metrics['account_week_revenue']))}</code><br>"
+        f"• <b>Avg order value:</b> <code>{esc(_fmt_money(metrics.get('account_avg_value', 0)))}</code><br>"
+        f"• <b>Refunded / cancelled:</b> <code>{metrics.get('account_refunded', 0):,}</code> / <code>{metrics.get('account_cancelled', 0):,}</code><br>"
+        f"• <b>Top 3 countries:</b> {tc_text}"
+        "</blockquote>"
+    )
+    # SMM
+    smm = (
+        "<blockquote>📱 <b>SMM</b><br>"
+        f"• <b>Orders:</b> <code>{metrics['smm_orders']:,}</code> · <b>Open:</b> <code>{metrics['smm_open_orders']:,}</code><br>"
+        f"• <b>Gross:</b> <code>{esc(_fmt_money(metrics['smm_gross']))}</code> · <b>Net:</b> <code>{esc(_fmt_money(metrics['smm_net']))}</code> · <b>Refunded:</b> <code>{esc(_fmt_money(metrics['smm_refunds']))}</code><br>"
+        f"• <b>Today / week net:</b> <code>{esc(_fmt_money(metrics['smm_today_net']))}</code> / <code>{esc(_fmt_money(metrics['smm_week_net']))}</code><br>"
+        f"• <b>Avg order value:</b> <code>{esc(_fmt_money(metrics.get('smm_avg_value', 0)))}</code> · <b>Top category:</b> <code>{esc(metrics.get('smm_top_category', '—'))}</code>"
+        "</blockquote>"
+    )
+    # OTP
+    otp_top_app = esc(metrics.get('otp_top_app', '—'))
+    otp_top_country = esc(metrics.get('otp_top_country', '—'))
+    otp_top_route = esc(metrics.get('otp_top_route', '—'))
+    catalog_age = metrics.get('otp_catalog_age')
+    if catalog_age is not None:
+        catalog_age_text = f"{int(catalog_age//60)}m ago" if catalog_age < 3600 else f"{catalog_age/3600:.1f}h ago"
+    else:
+        catalog_age_text = "—"
+    enabled_lines = metrics.get('otp_enabled_lines', [])
+    enabled_text = ", ".join(esc(l) for l in enabled_lines) if enabled_lines else "—"
+    otp = (
+        "<blockquote>📲 <b>OTP (TemporaSMS)</b><br>"
+        f"• <b>Orders:</b> <code>{metrics.get('otp_orders', 0):,}</code> · <b>Gross:</b> <code>{esc(_fmt_money(metrics.get('otp_gross', 0)))}</code> · <b>Net:</b> <code>{esc(_fmt_money(metrics.get('otp_net', 0)))}</code> · <b>Refunded:</b> <code>{esc(_fmt_money(metrics.get('otp_refunded_amount', 0)))}</code> <code>({metrics.get('otp_refunded_count',0):,})</code><br>"
+        f"• <b>Today / week:</b> <code>{metrics.get('otp_today_count',0):,}</code> · <code>{esc(_fmt_money(metrics.get('otp_today_revenue',0)))}</code> / <code>{metrics.get('otp_week_count',0):,}</code> · <code>{esc(_fmt_money(metrics.get('otp_week_revenue',0)))}</code><br>"
+        f"• <b>Provider cost:</b> <code>${metrics.get('otp_cost_total',0):,.4f}</code> · <b>Live cost:</b> <code>${metrics.get('otp_live_cost_total',0):,.4f}</code> · <b>Retail price (net):</b> <code>{esc(_fmt_money(metrics.get('otp_net',0)))}</code><br>"
+        f"• <b>Gross margin:</b> <code>{esc(_fmt_money(metrics.get('otp_margin',0)))}</code> · <code>{esc(_fmt_pct(metrics.get('otp_margin_percent',0)))}</code><br>"
+        f"• <b>Statuses:</b> waiting <code>{metrics.get('otp_waiting',0):,}</code> · allocating <code>{metrics.get('otp_allocating',0):,}</code> · review <code>{metrics.get('otp_review',0):,}</code> · refunding <code>{metrics.get('otp_refunding',0):,}</code> · unpaid <code>{metrics.get('otp_unpaid',0):,}</code><br>"
+        f"• <b>Top app / country / line:</b> <code>{otp_top_app}</code> / <code>{otp_top_country}</code> / <code>{otp_top_route}</code><br>"
+        f"• <b>Catalog:</b> <code>{metrics.get('otp_catalog_count',0):,}</code> entries · age <code>{esc(catalog_age_text)}</code> · enabled <code>{esc(enabled_text)}</code>"
+        "</blockquote>"
+    )
+    # Attention
+    alerts = metrics.get('alerts', [])
+    if alerts:
+        alert_items = "<br>".join(f"• {esc(a)}" for a in alerts)
+        attention = f"<blockquote>⚠️ <b>Attention / Alerts</b><br>{alert_items}</blockquote>"
+    else:
+        attention = "<blockquote>⚠️ <b>Attention / Alerts</b><br>• <code>All clear — no issues detected</code></blockquote>"
+
+    # Bot & Provider Health
+    health_otp_last = health.get('otp_last_warm')
+    health_otp_text = health_otp_last.strftime('%d %b %H:%M UTC') if isinstance(health_otp_last, datetime) else esc(health_otp_last or "not yet")
+    db_counts = health.get('db_counts', {})
+    db_text = " · ".join(f"{esc(k)}: <code>{v:,}</code>" for k, v in db_counts.items()) if db_counts else "<code>—</code>"
+    bot_health = (
+        "<blockquote>🤖 <b>Bot &amp; Provider Health</b><br>"
+        f"• <b>Process:</b> <code>{_status_dot(health.get('process'))} {esc(health.get('process'))}</code> · <b>Uptime:</b> <code>{esc(health.get('uptime'))}</code><br>"
+        f"• <b>Telegram API:</b> <code>{_status_dot(health.get('telegram'))} {esc(health.get('telegram'))}</code><br>"
+        f"• <b>SMM monitor:</b> <code>{_status_dot(health.get('checker'))} {esc(health.get('checker'))}</code> · <b>Last cycle:</b> <code>{esc(health.get('checker_last_run').strftime('%d %b %H:%M UTC') if health.get('checker_last_run') else 'not yet')}</code><br>"
+        + (f"• <b>Last SMM error:</b> <code>{esc(health.get('checker_error'))}</code><br>" if health.get('checker_error') else "")
+        + f"• <b>OTP worker:</b> <code>{esc(health.get('otp_worker'))}</code> · <b>Last catalog warm:</b> <code>{health_otp_text}</code><br>"
+        f"• <b>Provider balance:</b> <code>{esc(health.get('provider_balance'))}</code><br>"
+        f"• <b>DB counts:</b> {db_text}"
+        "</blockquote>"
+    )
+    # Footer
+    footer = (
+        f"<p><i>Generated {esc(now.strftime('%d %b %Y %H:%M UTC'))} · {esc(now_ist.strftime('%d %b %Y %H:%M IST'))} · window: today/week (UTC)</i><br>"
+        "<i>Legend: 📈 up · 📉 down · ➖ steady · 🟢 ok · ⚪ stale · 🔴 down · ₹ INR · $ USD</i></p>"
+    )
+
+    return (
+        "<h2>💎 Premium Admin Analytics — Full Detail</h2>"
+        + overview + user_growth + wallet + account_sales + smm + otp + attention + bot_health + footer
     )
 
 

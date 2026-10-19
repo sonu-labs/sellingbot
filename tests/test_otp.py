@@ -188,6 +188,7 @@ class ServicesCatalogTests(unittest.IsolatedAsyncioTestCase):
 
         class FakeAPI:
             async def catalog(self, action, **params):
+                params = {k:v for k,v in params.items() if k != "_purpose"}
                 calls.append((action, params))
                 if action == "getOperators":
                     return {"Operator 3": "3", "Operator 10": "10"}
@@ -198,7 +199,9 @@ class ServicesCatalogTests(unittest.IsolatedAsyncioTestCase):
         items, operator = await fetch_services_catalog(FakeAPI(), ("1", "10"))
         self.assertEqual(operator, "10")
         self.assertEqual(items, [("tg", "Telegram")])
-        self.assertEqual(calls, [("getOperators", {}), ("getServices", {"operator": "10"})])
+        # _purpose is stripped in real client, but FakeAPI catalog doesn't use it; filter it if present
+        filtered = [(a, {k:v for k,v in p.items() if k != "_purpose"}) for a,p in calls]
+        self.assertEqual(filtered, [("getOperators", {}), ("getServices", {"operator": "10"})])
 
     async def test_services_are_never_requested_without_a_usable_operator(self):
         actions = []

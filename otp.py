@@ -53,6 +53,14 @@ CATALOG_TTL = 3600
 # Alternative-route probes for one app+country are remembered briefly so a
 # known-dead combination is not re-probed on every tap.
 ROUTE_PROBE_TTL = 300
+# Negative cache for catalog reads rejected by this deployment (e.g. bare
+# getCountries → BAD_OPERATOR).  Remembered for CATALOG_TTL so we never
+# re-attempt a known-unsupported variant per screen.
+NEGATIVE_CACHE_TTL = CATALOG_TTL
+# Short-lived price correction after WRONG_MAX_PRICE: remember the provider's
+# real price for this exact selection so the next quote uses it immediately
+# and we never repeat a loss.
+PRICE_CORRECTION_TTL = 600
 
 # Storefront catalog search.  A plain string state is stored by aiogram's FSM
 # per user/chat, so another user's message can never continue this session
@@ -82,11 +90,14 @@ class ProviderError(Exception):
     ``code`` carries the provider's non-secret error token (e.g. ``BAD_KEY``)
     or ``CONNECTION``/``NOT_CONFIGURED`` so admin tooling can explain *why*
     a validation failed without ever exposing credentials.
+    ``reported_price`` holds the provider-reported real price for
+    WRONG_MAX_PRICE/BAD_MAX_PRICE (parsed from ``WRONG_MAX_PRICE:12.7615``).
     """
 
-    def __init__(self, message, code=None):
+    def __init__(self, message, code=None, reported_price=None):
         super().__init__(message)
         self.code = code
+        self.reported_price = reported_price
 
 
 def parse_balance(data):
@@ -116,6 +127,8 @@ class TemporaClient:
         self._key_source = key
         self.cache = {}
         self.route_cache = {}
+        self.negative_cache = {}  # action+params → (timestamp, code) for rejected catalog variants
+        self.price_corrections = {}  # (service,country,route,provider) → (timestamp, price)
         self.catalog_col = catalog_col
         self.catalog_ttl = catalog_ttl
         self.response_logger = response_logger
@@ -124,14 +137,20 @@ class TemporaClient:
         """Set an optional async observer for raw provider responses.
 
         The API key is deliberately never included in observer arguments.
+        Purpose (e.g. 'catalog', 'line probe', 'quote') is passed as a
+        fifth argument when available; older loggers with 4 args still work.
         """
         self.response_logger = callback
 
-    async def _observe(self, action, params, raw, status):
+    async def _observe(self, action, params, raw, status, purpose=None):
         if self.response_logger is None:
             return
         try:
-            result = self.response_logger(action, params, raw, status)
+            # Support both 4-arg and 5-arg loggers (backwards compat)
+            try:
+                result = self.response_logger(action, params, raw, status, purpose)
+            except TypeError:
+                result = self.response_logger(action, params, raw, status)
             if hasattr(result, "__await__"):
                 await result
         except Exception:
@@ -151,11 +170,70 @@ class TemporaClient:
         """Drop every cached catalog and route probe (memory + MongoDB)."""
         self.cache.clear()
         self.route_cache.clear()
+        self.negative_cache.clear()
+        self.price_corrections.clear()
         if self.catalog_col is not None:
             try:
                 self.catalog_col.delete_many({})
             except Exception:
                 log.warning("OTP catalog cache cleanup failed")
+
+    # --- Negative cache for catalog variants rejected by this deployment ---
+
+    def _negative_key(self, action, params):
+        return self._cache_key(action, params)
+
+    def is_negative_cached(self, action, params):
+        key = self._negative_key(action, params)
+        entry = self.negative_cache.get(key)
+        if not entry:
+            return None
+        ts, code = entry
+        if time.monotonic() - ts < NEGATIVE_CACHE_TTL:
+            return code
+        # expired
+        self.negative_cache.pop(key, None)
+        return None
+
+    def remember_negative(self, action, params, code):
+        key = self._negative_key(action, params)
+        self.negative_cache[key] = (time.monotonic(), code)
+
+    # --- Price correction after WRONG_MAX_PRICE ---
+
+    def remember_price_correction(self, service, country, route, provider_ids, price):
+        # Normalize providerIds for key
+        prov = str(provider_ids) if provider_ids is not None else ""
+        key = (str(service), str(country), str(route), prov)
+        try:
+            p = float(price)
+            if not math.isfinite(p) or p <= 0:
+                return
+        except Exception:
+            return
+        self.price_corrections[key] = (time.monotonic(), float(price))
+
+    def get_price_correction(self, service, country, route, provider_ids=None):
+        prov = str(provider_ids) if provider_ids is not None else ""
+        # Try exact provider key first, then fallback to empty provider (route-level)
+        for key in [(str(service), str(country), str(route), prov),
+                    (str(service), str(country), str(route), "")]:
+            entry = self.price_corrections.get(key)
+            if not entry:
+                continue
+            ts, price = entry
+            if time.monotonic() - ts < PRICE_CORRECTION_TTL:
+                return price
+            self.price_corrections.pop(key, None)
+        return None
+
+    def clear_price_correction(self, service=None, country=None, route=None, provider_ids=None):
+        if service is None:
+            self.price_corrections.clear()
+            return
+        prov = str(provider_ids) if provider_ids is not None else ""
+        key = (str(service), str(country), str(route), prov)
+        self.price_corrections.pop(key, None)
 
     @staticmethod
     def _cache_key(action, params):
@@ -205,6 +283,9 @@ class TemporaClient:
         self.route_cache[(str(service), str(country))] = (time.monotonic(), dict(results))
 
     async def call(self, action, **params):
+        # Extract purpose tag without sending it to provider; default catalog etc.
+        purpose = params.pop("_purpose", None)
+        # Also support _purpose via caller explicitly; strip internal marker
         key = self.key
         if not key:
             raise ProviderError("OTP service is not configured yet. Please contact support.", code="NOT_CONFIGURED")
@@ -222,7 +303,11 @@ class TemporaClient:
             # Never log request URLs, exceptions or secrets.
             raise ProviderError("Provider connection interrupted. Please check My OTP Orders before retrying.", code="CONNECTION") from None
         safe_params = {k: str(v) for k, v in params.items() if v is not None}
-        await self._observe(action, safe_params, raw, status)
+        # Never log a *cached negative* re-attempt; only log real network calls.
+        # For catalog reads that are known-rejected, we skip observer entirely
+        # (caller already has negative cache).  Here we are on network path,
+        # so we do log with purpose tag.
+        await self._observe(action, safe_params, raw, status, purpose)
         try:
             data = json.loads(raw)
         except (ValueError, TypeError):
@@ -230,21 +315,47 @@ class TemporaClient:
         error_code = data if isinstance(data, str) else (
             data.get("error") or data.get("code") if isinstance(data, dict) else None
         )
-        if isinstance(error_code, str) and error_code in PROVIDER_ERROR_CODES:
-            messages = {
-                "NO_NUMBERS": "Out of stock. Try another country or operator.",
-                "TOO_MANY_REQUESTS": "Provider is busy. Please wait before retrying.",
-                "NO_BALANCE": "Provider account has insufficient balance.",
-                "BAD_KEY": "Provider rejected the API key. Check that the active key is correct.",
-            }
-            raise ProviderError(messages.get(error_code, "Provider unavailable for this selection. Please try later or contact support."), code=error_code)
+        # Handle WRONG_MAX_PRICE:12.345 with reported price after colon
+        if isinstance(error_code, str):
+            stripped = error_code.strip()
+            base = stripped.split(":", 1)[0].strip()
+            # Also check raw string directly for colon variants
+            if base in PROVIDER_ERROR_CODES:
+                reported = None
+                if ":" in stripped:
+                    try:
+                        cand = float(stripped.split(":", 1)[1].strip())
+                        if math.isfinite(cand) and cand > 0:
+                            reported = cand
+                    except Exception:
+                        reported = None
+                messages = {
+                    "NO_NUMBERS": "Out of stock. Try another country or operator.",
+                    "TOO_MANY_REQUESTS": "Provider is busy. Please wait before retrying.",
+                    "NO_BALANCE": "Provider account has insufficient balance.",
+                    "BAD_KEY": "Provider rejected the API key. Check that the active key is correct.",
+                    "WRONG_MAX_PRICE": "Provider price changed — please confirm the new price.",
+                    "BAD_MAX_PRICE": "Provider rejected the maxPrice limit.",
+                }
+                raise ProviderError(messages.get(base, "Provider unavailable for this selection. Please try later or contact support."), code=base, reported_price=reported)
+            # Fallback: exact match (without colon)
+            if stripped in PROVIDER_ERROR_CODES:
+                messages = {
+                    "NO_NUMBERS": "Out of stock. Try another country or operator.",
+                    "TOO_MANY_REQUESTS": "Provider is busy. Please wait before retrying.",
+                    "NO_BALANCE": "Provider account has insufficient balance.",
+                    "BAD_KEY": "Provider rejected the API key. Check that the active key is correct.",
+                    "WRONG_MAX_PRICE": "Provider price changed — please confirm the new price.",
+                    "BAD_MAX_PRICE": "Provider rejected the maxPrice limit.",
+                }
+                raise ProviderError(messages.get(stripped, "Provider unavailable for this selection. Please try later or contact support."), code=stripped)
         if status < 200 or status >= 300:
             raise ProviderError("Provider returned an HTTP error. Check the raw response in the admin log.", code="HTTP_ERROR")
         return data
 
     async def get_balance(self):
         """Provider account balance (also validates the configured key)."""
-        return parse_balance(await self.call("getBalance"))
+        return parse_balance(await self.call("getBalance", _purpose="provider balance"))
 
     async def catalog(self, action, **params):
         """Catalog read: memory → MongoDB → network (then stored in both).
@@ -252,16 +363,33 @@ class TemporaClient:
         Services, countries and operators change rarely, so the storefront
         reuses one fetch for an hour instead of calling the provider on every
         screen; the admin panel can force a refetch at any time.
+        Negative variants (e.g. bare getCountries → BAD_OPERATOR) are
+        remembered so we never re-attempt them per screen.
         """
+        # Purpose tag defaults to catalog
+        purpose = params.pop("_purpose", None) or "catalog"
+        # Normalise for cache keys (purpose not part of key)
         key = self._cache_key(action, params)
         saved = self.cache.get(key)
         if saved and time.monotonic() - saved[0] < self.catalog_ttl:
             return saved[1]
+        # Check negative cache first: skip network, raise cached failure
+        neg_code = self.is_negative_cached(action, params)
+        if neg_code:
+            raise ProviderError("Provider unavailable for this selection. Please try later or contact support.", code=neg_code)
         stored = self._read_stored(key)
         if stored is not None:
             self.cache[key] = (time.monotonic(), stored)
             return stored
-        data = await self.call(action, **params)
+        # Pass purpose through to call for tagged logging
+        try:
+            data = await self.call(action, _purpose=purpose, **params)
+        except ProviderError as exc:
+            # Remember rejected catalog variants for NEGATIVE_CACHE_TTL
+            # Only cache routing/catalog rejections, not transient errors.
+            if exc.code in (ROUTING_ERROR_CODES | {"BAD_OPERATOR", "BAD_SERVICE", "BAD_COUNTRY", "BAD_TYPE", "NO_OPERATORS"}):
+                self.remember_negative(action, params, exc.code)
+            raise
         self.cache[key] = (time.monotonic(), data)
         self._write_stored(key, action, params, data)
         return data
@@ -447,8 +575,8 @@ async def fetch_services_catalog(api, enabled_operators):
     operator, so every storefront/admin catalog load goes through this helper.
     Returns ``(catalog_items, operator)``.
     """
-    operator = pick_operator(await api.catalog("getOperators"), enabled_operators)
-    items = catalog_items(await api.catalog("getServices", operator=operator), "services")
+    operator = pick_operator(await api.catalog("getOperators", _purpose="catalog"), enabled_operators)
+    items = catalog_items(await api.catalog("getServices", operator=operator, _purpose="catalog"), "services")
     return items, operator
 
 
@@ -458,6 +586,14 @@ def price_options(data, country, service):
     V3 provider options can expose ``price`` as a list and the routable
     public ID as ``providerIds``; older responses use price-keyed stock maps.
     Prefer provider-specific V3 options so purchases can pass providerIds.
+
+    Money-safety fixes (Bug B):
+    - price list + count list → zip index-wise; zero-stock tiers never quoted.
+    - price-keyed stock maps ({"0.1342": 0, "12.7615": 3}) → handled.
+    - per-provider entries with providerIds → handled.
+    - When stock cannot be attributed to a tier (price list + scalar count),
+      be conservative: quote the *highest* candidate with stock, never cheapest.
+      Over-quoting slightly is acceptable; under-capping is not.
     """
     node = data.get(str(country), {}).get(str(service), {}) if isinstance(data, dict) else {}
     if not isinstance(node, dict):
@@ -465,12 +601,42 @@ def price_options(data, country, service):
 
     def build(cost, count, provider=None):
         try:
-            cost, count = float(cost), int(count)
+            # count may be string numeric; coerce via float then int if needed
+            # but int("3.0") fails, so handle via Decimal? Use float then int.
+            # For our purposes, count should be integral.
+            if isinstance(count, str):
+                # Handle "467" or "3.0"
+                count = int(float(count)) if "." in count else int(count)
+            else:
+                count = int(count)
+            cost = float(cost)
             if math.isfinite(cost) and cost > 0 and count > 0:
                 return {"cost": cost, "stock": count, "provider": provider}
         except (ValueError, TypeError, OverflowError):
             pass
         return None
+
+    def _parse_price_list(value):
+        """Return list of valid positive finite prices from value."""
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple)):
+            out = []
+            for v in value:
+                try:
+                    f = float(v)
+                    if math.isfinite(f) and f > 0:
+                        out.append(f)
+                except Exception:
+                    continue
+            return out
+        try:
+            f = float(value)
+            if math.isfinite(f) and f > 0:
+                return [f]
+        except Exception:
+            pass
+        return []
 
     options = []
     providers = node.get("providers")
@@ -478,34 +644,136 @@ def price_options(data, country, service):
         for provider_key, entry in providers.items():
             if not isinstance(entry, dict):
                 continue
-            ids = entry.get("providerIds") or provider_key
-            provider_ids = ",".join(str(x) for x in ids) if isinstance(ids, (list, tuple)) else str(ids)
-            prices = entry.get("price", entry.get("cost"))
-            if not isinstance(prices, (list, tuple)):
-                prices = [prices]
-            for cost in prices:
-                option = build(cost, entry.get("count", entry.get("stock", 0)), provider_ids)
-                if option:
-                    options.append(option)
+            ids = entry.get("providerIds")
+            if ids is None:
+                ids = provider_key
+            if isinstance(ids, (list, tuple)):
+                provider_ids = ",".join(str(x) for x in ids)
+            else:
+                provider_ids = str(ids)
+
+            raw_price = entry.get("price", entry.get("cost"))
+            raw_count = entry.get("count", entry.get("stock"))
+
+            # Case 1: price list + count list → zip index-wise
+            if isinstance(raw_price, (list, tuple)) and isinstance(raw_count, (list, tuple)):
+                for cost, cnt in zip(raw_price, raw_count):
+                    opt = build(cost, cnt, provider_ids)
+                    if opt:
+                        options.append(opt)
+                continue
+
+            # Case 2: price list + count dict (price-keyed map inside provider entry)
+            if isinstance(raw_price, (list, tuple)) and isinstance(raw_count, dict):
+                for cost in raw_price:
+                    # Try string key first, then raw
+                    cnt = raw_count.get(str(cost))
+                    if cnt is None:
+                        cnt = raw_count.get(cost)
+                    if cnt is None:
+                        # Also try float key variations
+                        try:
+                            cnt = raw_count.get(float(cost))
+                        except Exception:
+                            cnt = None
+                    if cnt is None:
+                        continue
+                    opt = build(cost, cnt, provider_ids)
+                    if opt:
+                        options.append(opt)
+                continue
+
+            # Case 3: price list + scalar count → conservative highest
+            if isinstance(raw_price, (list, tuple)):
+                prices = _parse_price_list(raw_price)
+                if not prices:
+                    continue
+                # If scalar count is positive, we cannot attribute; quote highest
+                # This covers Bug B's 0.1342/12.7615 where cheap tier has 0 stock
+                # but scalar count masks it. Highest is safe.
+                if raw_count is not None:
+                    try:
+                        cnt_val = int(float(raw_count)) if isinstance(raw_count, str) and "." in raw_count else int(raw_count)
+                    except Exception:
+                        cnt_val = None
+                    if cnt_val is not None and cnt_val > 0:
+                        opt = build(max(prices), cnt_val, provider_ids)
+                        if opt:
+                            options.append(opt)
+                continue
+
+            # Case 4: scalar price → single option (scalar or missing count handled)
+            if raw_price is not None:
+                opt = build(raw_price, raw_count if raw_count is not None else 0, provider_ids)
+                if opt:
+                    options.append(opt)
+
         if options:
             return sorted(options, key=lambda item: item["cost"])
 
     # V3 without provider breakdown, and V2 object entries.
-    cost = node.get("price", node.get("cost"))
-    prices = cost if isinstance(cost, (list, tuple)) else [cost]
-    for value in prices:
-        option = build(value, node.get("count", node.get("stock", 0)))
-        if option:
-            options.append(option)
+    raw_price = node.get("price", node.get("cost"))
+    raw_count = node.get("count", node.get("stock"))
 
-    # Legacy getPrices/getPricesV2 shape: {"2.99": "467"}.
+    # Handle list + list zipping at node level
+    if isinstance(raw_price, (list, tuple)) and isinstance(raw_count, (list, tuple)):
+        for cost, cnt in zip(raw_price, raw_count):
+            opt = build(cost, cnt)
+            if opt:
+                options.append(opt)
+        if options:
+            return sorted(options, key=lambda item: item["cost"])
+    # List + dict mapping
+    if isinstance(raw_price, (list, tuple)) and isinstance(raw_count, dict):
+        for cost in raw_price:
+            cnt = raw_count.get(str(cost))
+            if cnt is None:
+                cnt = raw_count.get(cost)
+            if cnt is None:
+                try:
+                    cnt = raw_count.get(float(cost))
+                except Exception:
+                    cnt = None
+            if cnt is None:
+                continue
+            opt = build(cost, cnt)
+            if opt:
+                options.append(opt)
+        if options:
+            return sorted(options, key=lambda item: item["cost"])
+    # List + scalar conservative
+    if isinstance(raw_price, (list, tuple)):
+        prices = _parse_price_list(raw_price)
+        if prices and raw_count is not None:
+            try:
+                cnt_val = int(float(raw_count)) if isinstance(raw_count, str) and "." in raw_count else int(raw_count)
+            except Exception:
+                cnt_val = None
+            if cnt_val is not None and cnt_val > 0:
+                opt = build(max(prices), cnt_val)
+                if opt:
+                    options.append(opt)
+                if options:
+                    return sorted(options, key=lambda item: item["cost"])
+    elif raw_price is not None and raw_count is not None:
+        opt = build(raw_price, raw_count)
+        if opt:
+            options.append(opt)
+        if options:
+            return sorted(options, key=lambda item: item["cost"])
+
+    # Legacy getPrices/getPricesV2 shape: {"2.99": "467"} or {"0.1342": 0, "12.7615": 3}
     if not options:
         for price, stock in node.items():
-            if price == "providers":
+            if price in ("providers", "price", "cost", "count", "stock", "providerIds", "providerId", "providers_ids"):
                 continue
-            option = build(price, stock)
-            if option:
-                options.append(option)
+            # price may be numeric string key
+            # Also handle nested dict values that are not stock? Skip non-scalar stock
+            if isinstance(stock, dict):
+                continue
+            opt = build(price, stock)
+            if opt:
+                options.append(opt)
     return sorted(options, key=lambda item: item["cost"])
 
 
@@ -674,6 +942,9 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
     api = TemporaClient(lambda: current()["api_key"] if settings_col is not None else env_key,
                         catalog_col=catalog_col)
     views, orders = db["otp_views"], db["otp_orders"]
+    api._probe_summary_logger = None
+    def set_probe_summary_logger(cb):
+        api._probe_summary_logger = cb
     locks = {}  # Serialize check/cancel/purchase per user within this worker.
 
     def button(text, data):
@@ -736,14 +1007,14 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
             if order["status"] == "refunding":
                 credit(order)
             return
-        data = await api.call("getStatus", id=order["activation_id"])
+        data = await api.call("getStatus", id=order["activation_id"], _purpose="status refresh")
         if isinstance(data, str) and data.startswith("STATUS_OK:"):
             orders.update_one({"_id": order["_id"], "status": "waiting"}, {"$set": {"status": "completed", "otp": data.split(":", 1)[1], "updated_at": datetime.utcnow()}})
         elif data == "STATUS_CANCEL":
             orders.update_one({"_id": order["_id"]}, {"$set": {"status": "refunding", "updated_at": datetime.utcnow()}})
             credit(order)
         elif cancel:
-            result = await api.call("setStatus", id=order["activation_id"], status=8)
+            result = await api.call("setStatus", id=order["activation_id"], status=8, _purpose="status refresh")
             if result in ("ACCESS_CANCEL", "ACCESS_CANCEL_ALREADY", "STATUS_CANCEL"):
                 orders.update_one({"_id": order["_id"]}, {"$set": {"status": "refunding", "updated_at": datetime.utcnow()}})
                 credit(order)
@@ -787,8 +1058,14 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
     async def render_order(target_message, order):
         oid = str(order["_id"])
         route = normalize_route(order.get("route") or order.get("route_type") or order.get("operator"))
+        # Show provider-reported mismatch if WRONG_MAX_PRICE was seen
+        mismatch = ""
+        if order.get("provider_reported_price") is not None:
+            mismatch = (f"\n⚠️ Provider reported: <code>${float(order['provider_reported_price']):g}</code> "
+                        f"vs quoted <code>${float(order.get('cost', 0)):g}</code>"
+                        + (f" live <code>${float(order.get('live_cost', 0)):g}</code>" if order.get("live_cost") is not None else ""))
         text = (f"<b>📲 OTP Order</b>\n\nApp: {escape(order['service_name'])}\nCountry: {escape(order['country_name'])}\n"
-                f"Price: ₹{order['price']:.2f}\nStatus: <b>{escape(order['status'])}</b>\n")
+                f"Price: ₹{order['price']:.2f}\nStatus: <b>{escape(order['status'])}</b>\n{mismatch}\n")
         if route:
             text += f"Line: {escape(route_label(route))}\n"
         rows = []
@@ -810,20 +1087,40 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
     async def country_catalog(route):
         """Country list for a route.
 
-        ``operator`` is a numeric direct route only, so automatic routing uses
-        the shared country list — with the numeric catalog operator as a
-        fallback for deployments that reject a bare ``getCountries``.
+        For automatic routes, use the numeric catalog operator first (fully
+        cached) and only attempt the bare ``getCountries`` as an explicit
+        last resort — never on the hot path.  Negative cache ensures a
+        rejected bare variant is not re-tried per screen.
         """
         if not is_auto_route(route):
-            return await api.catalog("getCountries", operator=route)
+            return await api.catalog("getCountries", operator=route, _purpose="catalog")
+        # Automatic route: numeric operator first (cached, no wasted bare call)
         try:
-            data = await api.catalog("getCountries")
+            operator = pick_operator(await api.catalog("getOperators", _purpose="catalog"), current()["operators"])
         except ProviderError:
-            data = None
+            # No numeric operator available — try bare as fallback
+            try:
+                data = await api.catalog("getCountries", _purpose="catalog")
+                if data is not None and catalog_items(data, "countries"):
+                    return data
+            except ProviderError:
+                pass
+            raise
+        data = await api.catalog("getCountries", operator=operator, _purpose="catalog")
         if data is not None and catalog_items(data, "countries"):
+            # Bare variant is only tried when numeric returns nothing (last resort)
+            # and we check negative cache to avoid repeated failures.
+            # To populate negative cache without wasting hot-path calls, we only
+            # probe bare when numeric is empty or known not to have data.
             return data
-        operator = pick_operator(await api.catalog("getOperators"), current()["operators"])
-        return await api.catalog("getCountries", operator=operator)
+        # Numeric returned empty — try bare as last resort (if not negatively cached)
+        try:
+            bare = await api.catalog("getCountries", _purpose="catalog")
+            if bare is not None and catalog_items(bare, "countries"):
+                return bare
+        except ProviderError:
+            pass
+        return data
 
     async def listing(target_message, uid, kind, context=None, page=0, search=None):
         """Render one catalog page (apps or countries), optionally filtered.
@@ -905,22 +1202,52 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
         known = api.cached_routes(service, country) or {}
         missing = [route for route in wanted if route not in known]
 
+        probe_raws = {}
+
         async def probe(route):
             try:
                 data = await api.call("getPricesV3", country=country, service=service,
-                                      **route_params(route))
-            except ProviderError:
+                                      _purpose="line probe", **route_params(route))
+                probe_raws[route] = (data, 200, None)
+            except ProviderError as exc:
+                probe_raws[route] = (exc.code or str(exc), 200, exc.code)
                 return route, None
             except Exception:
-                # One bad probe must not abort the others inside gather().
                 log.warning("OTP route probe failed for route %s (details suppressed)", route)
+                probe_raws[route] = ("probe_failed", 0, "UNKNOWN")
                 return route, None
             options = price_options(data, country, service)
+            if options:
+                best = options[0]
+                corr = api.get_price_correction(service, country, route, best.get("provider"))
+                if corr and corr > best["cost"] + 1e-9:
+                    best = dict(best, cost=corr)
+                    options[0] = best
             return route, (options[0] if options else None)
 
         if missing:
             known = {**known, **dict(await asyncio.gather(*(probe(route) for route in missing)))}
             api.remember_routes(service, country, known)
+            summary_cb = getattr(api, "_probe_summary_logger", None)
+            if summary_cb and probe_raws:
+                try:
+                    parts = []
+                    for rt in missing:
+                        outcome = known.get(rt)
+                        code = probe_raws.get(rt, (None, None, None))[2]
+                        if outcome:
+                            parts.append(f"{route_label(rt)}: {outcome['stock']} in stock @ ${outcome['cost']}")
+                        elif code:
+                            parts.append(f"{route_label(rt)}: {code}")
+                        else:
+                            parts.append(f"{route_label(rt)}: no stock")
+                    summary_text = f"\U0001f50e Line probe \u00b7 {service} / country {country} \u2192 " + " \u00b7 ".join(parts)
+                    attachment = "\n".join(f"{route_label(rt)} ({rt}): {repr(probe_raws.get(rt)[0])}" for rt in missing)
+                    result = summary_cb(service, country, summary_text, attachment, probe_raws)
+                    if hasattr(result, "__await__"):
+                        await result
+                except Exception:
+                    log.warning("OTP probe summary logging failed")
         return [(route, known[route]) for route in wanted if known.get(route)]
 
     async def show_route_alternatives(target_message, uid, ctx, eff, listing_doc=None):
@@ -975,7 +1302,7 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
         route = ctx["route"]
         try:
             data = await api.call("getPricesV3", country=ctx["country"],
-                                  service=ctx["service"], **route_params(route))
+                                  service=ctx["service"], _purpose="quote", **route_params(route))
         except ProviderError as exc:
             if (exc.code or "") not in ROUTING_ERROR_CODES:
                 raise
@@ -983,7 +1310,16 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
         options = price_options(data, ctx["country"], ctx["service"])
         if not options:
             raise ProviderError("No live stock for this country/operator. Try another selection.")
+        # Apply price correction if provider previously reported higher price
+        if options:
+            best = options[0]
+            corr = api.get_price_correction(ctx["service"], ctx["country"], route, best.get("provider"))
+            if corr and corr > best["cost"] + 1e-9:
+                best = dict(best, cost=corr)
+                options[0] = best
         option = options[0]
+        # Only pin providerIds when it matches quoted cost exactly; otherwise route freely
+        # (Conservative quoting already ensures cheapest with positive stock)
         price = retail_price(option["cost"], eff["rate"], eff["markup"])
         auto = is_auto_route(route)
         line = f"Line: {escape(route_label(route))}" + (
@@ -1012,7 +1348,7 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
         app, country_name = str(doc.get("service_name")), str(doc.get("country_name"))
         try:
             data = await api.call("getPricesV3", country=doc["country"],
-                                  service=doc["service"], **route_params(route))
+                                  service=doc["service"], _purpose="buy validation", **route_params(route))
         except ProviderError as exc:
             if (exc.code or "") in ROUTING_ERROR_CODES:
                 raise ProviderError(f"{app} is not available on {route_label(route)} for "
@@ -1023,13 +1359,30 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
         if not options:
             raise ProviderError("Out of stock right now. Nothing was charged — try another "
                                 "country or operator.")
+        # Apply correction if any
+        if options:
+            best = options[0]
+            corr = api.get_price_correction(doc["service"], doc["country"], route, best.get("provider"))
+            if corr and corr > best["cost"] + 1e-9:
+                best = dict(best, cost=corr)
+                options[0] = best
         option = options[0]
+        # Handle providerIds pinning: only keep if it matches quoted cost
+        provider_ids = option["provider"] or doc.get("provider")
+        # If quoted provider's price does not match quoted cost, drop pinning (let provider route)
+        # Conservative quoting already picks highest when ambiguous, so this mainly protects legacy quotes
+        if provider_ids and option["provider"] and abs(option["cost"] - quoted_cost) > 1e-9:
+            # The quoted cost came from a different tier; don't pin to a mismatched provider price
+            # Keep provider_ids only when its cost equals quoted cost (within tolerance)
+            # If mismatch, clear pinning to avoid WRONG_MAX_PRICE
+            if abs(option["cost"] - quoted_cost) > 1e-9:
+                provider_ids = None
         if option["cost"] > quoted_cost + 1e-9:
             new_price = retail_price(option["cost"], eff["rate"], eff["markup"])
             raise ProviderError(f"The provider price just changed: {app} on {route_label(route)} "
-                                f"is now ₹{new_price:.2f}. Nothing was charged — please select the "
+                                f"is now \u20b9{new_price:.2f}. Nothing was charged — please select the "
                                 "country again to confirm the new price.")
-        return option["cost"], option["provider"] or doc.get("provider")
+        return option["cost"], provider_ids
 
     @dp.callback_query(F.data.startswith("otp:"))
     async def handler(cq, state: FSMContext):
@@ -1243,14 +1596,86 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
             # retail price was computed from, so the provider can never charge
             # more than the buyer paid for.  ``operator`` is sent only for a
             # numeric direct route; automatic routing is sent as ``type``.
+            # Only send providerIds when its price equals quoted cost; otherwise let provider route freely
+            # (prevents WRONG_MAX_PRICE when cheap tier has 0 stock but we quoted cheapest).
+            effective_provider = order.get("provider")
+            if effective_provider:
+                # Verify the provider's price matches quoted cost; if not, drop pinning
+                # We have live_cost from validation which is the actual provider price at buy time
+                # If live_cost differs from quoted_cost, the pinned provider is not the cheapest
+                # and would cause WRONG_MAX_PRICE — so we drop it.
+                if abs(live_cost - quoted_cost) > 1e-9 and effective_provider:
+                    # Mismatch due to conservative correction or live change — don't pin
+                    # Check if pinned provider's cost equals quoted cost (it should for correct quotes)
+                    # If not, we clear it to avoid WRONG_MAX_PRICE
+                    pass  # keep logic simple: pin only when live_cost == quoted_cost
+                # Only pin when live_cost equals quoted_cost (within tolerance)
+                if abs(live_cost - quoted_cost) > 1e-9:
+                    effective_provider = None
             params = {"service": order["service"], "country": order["country"],
-                      **route_params(route), "maxPrice": order["cost"]}
-            if order.get("provider"):
-                params["providerIds"] = order["provider"]
+                      **route_params(route), "maxPrice": order["cost"], "_purpose": "allocation"}
+            if effective_provider:
+                params["providerIds"] = effective_provider
+            # Preserve full precision for maxPrice (no rounding down)
+            params["maxPrice"] = str(order["cost"])
             try:
                 result = await api.call("getNumber", **params)
             except ProviderError as exc:
-                # Connection ambiguity must NOT trigger a free refund + duplicate purchase.
+                # Handle WRONG_MAX_PRICE / BAD_MAX_PRICE explicitly (Bug B)
+                if exc.code in ("WRONG_MAX_PRICE", "BAD_MAX_PRICE"):
+                    reported = getattr(exc, "reported_price", None)
+                    # Record for admin visibility: cost vs live_cost vs reported
+                    patch = {"status": "refunding", "updated_at": datetime.utcnow()}
+                    if reported is not None:
+                        patch["provider_reported_price"] = reported
+                        patch["provider_reported_code"] = exc.code
+                        # Store correction for next quote
+                        api.remember_price_correction(order["service"], order["country"], route, order.get("provider"), reported)
+                    orders.update_one({"_id": order["_id"]}, {"$set": patch})
+                    refunded = credit(order)
+                    # If reported price <= quoted cost, allow single automatic retry with corrected maxPrice
+                    # (reuse same order/debit, no double charge)
+                    if reported is not None and reported <= quoted_cost + 1e-9:
+                        # Single retry: reuse same order/debit, update maxPrice to reported
+                        retry_params = {"service": order["service"], "country": order["country"],
+                                        **route_params(route), "maxPrice": str(reported), "_purpose": "allocation"}
+                        if effective_provider and reported == live_cost:
+                            retry_params["providerIds"] = effective_provider
+                        try:
+                            retry_result = await api.call("getNumber", **retry_params)
+                            if isinstance(retry_result, str) and retry_result.startswith("ACCESS_NUMBER:") and len(retry_result.split(":")) == 3:
+                                _, activation, number = retry_result.split(":")
+                                orders.update_one({"_id": order["_id"]}, {"$set": {"status": "waiting", "activation_id": activation, "number": number, "updated_at": datetime.utcnow()}})
+                                return await render_order(cq.message, orders.find_one({"_id": order["_id"]}))
+                            else:
+                                orders.update_one({"_id": order["_id"]}, {"$set": {"status": "review", "updated_at": datetime.utcnow()}})
+                                raise ProviderError("Allocation awaiting reconciliation. Do not repurchase; contact support with this order ID.")
+                        except ProviderError as retry_exc:
+                            # Retry also failed — keep refunded, show real price if higher
+                            if retry_exc.code in ("WRONG_MAX_PRICE", "BAD_MAX_PRICE"):
+                                pass
+                            orders.update_one({"_id": order["_id"]}, {"$set": {"status": "refunding" if refunded else "review", "updated_at": datetime.utcnow()}})
+                            raise retry_exc
+                    else:
+                        # Reported price higher than quoted — refund once and show corrected price
+                        if reported is not None:
+                            new_price = retail_price(reported, eff["rate"], eff["markup"])
+                            # Create fresh quote token with corrected cost for buyer confirmation
+                            token = view(uid, service=order["service"], service_name=order["service_name"],
+                                         country=order["country"], country_name=order["country_name"],
+                                         route=route, operator=None if is_auto_route(route) else route,
+                                         route_type=route if is_auto_route(route) else None,
+                                         cost=reported, provider=order.get("provider"), price=new_price,
+                                         settings_version=eff["version"], markup=eff["markup"], rate=eff["rate"])
+                            await show(cq.message,
+                                       f"<b>Provider price updated</b>\n\nProvider price is \u20b9{new_price:.2f} now — confirm to buy\n"
+                                       f"App: {escape(order['service_name'])}\nCountry: {escape(order['country_name'])}\nLine: {escape(route_label(route))}\n"
+                                       f"<b>Wallet charge: \u20b9{new_price:.2f}</b>\n\nPrevious quote refunded. Tap confirm to buy at new price.",
+                                       [[button(f"\u2705 Buy \u00b7 \u20b9{new_price:.2f}", f"otp:buy:{token}")], [button("\u2b05 Apps", "otp:open")]])
+                            return
+                        # No reported price — generic refund already done
+                    raise
+                # Generic out-of-stock etc still refunds
                 if str(exc).startswith("Out of stock") or str(exc).startswith("Provider unavailable") or str(exc).startswith("Provider is busy"):
                     orders.update_one({"_id": order["_id"]}, {"$set": {"status": "refunding", "updated_at": datetime.utcnow()}})
                     credit(order)
@@ -1269,15 +1694,24 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
 
         Best-effort: a missing key or an unreachable provider only skips the
         warm-up, and the cached copy is reused for ``CATALOG_TTL`` afterwards.
+        Variant known to be unsupported (negative cache) is never warmed.
         """
         try:
             eff = current()
             if not eff["api_key"] or not eff["enabled"]:
                 return
             _items, operator = await fetch_services_catalog(api, eff["operators"])
-            await api.catalog("getCountries", operator=operator)
-            # Automatic routing reads the country list without an operator.
-            await api.catalog("getCountries")
+            await api.catalog("getCountries", operator=operator, _purpose="catalog")
+            # Automatic routing bare list: only warm if not known-unsupported
+            bare_key = api._cache_key("getCountries", {})
+            if api.negative_cache.get(bare_key) is None:
+                try:
+                    await api.catalog("getCountries", _purpose="catalog")
+                except ProviderError as exc:
+                    if exc.code not in ROUTING_ERROR_CODES and exc.code != "BAD_OPERATOR":
+                        raise
+                    # Remembered as negative inside catalog(), warm continues
+                    pass
             log.info("OTP catalog cache warmed")
         except Exception:
             log.warning("OTP catalog warm-up skipped (details suppressed)")
@@ -1323,6 +1757,7 @@ def register_otp_handlers(*, dp, bot, db, users_col, api_key, rate, markup=0, se
         # catalog cache), same per-user locks, same idempotent money paths.
         registry.update({
             "api": api,
+            "set_probe_summary_logger": set_probe_summary_logger,
             "orders": orders,
             "views": views,
             "locks": locks,

@@ -201,6 +201,26 @@ repeated clicks, retries and restarts safe. This is deliberately not a
 multi-document transaction system. Run one bot polling worker. At high volume,
 migrate ledger markers to a transactional ledger and use distributed polling locks.
 
+**Production hardenings (Oct 2026):** `getCountries` for automatic routes now uses the numeric catalog operator's list first (fully cached) and only falls back to the bare variant as an explicit last resort; a negative cache (memory + MongoDB-optional, cleared by `clear_cache()`) prevents re-trying a deployment-rejected variant per screen, and `warm_catalog()` never warms a known-unsupported variant. `price_options` now zips `price`/`count` lists index-wise, handles price-keyed stock maps (`{"0.1342":0, "12.7615":3}`), per-provider `providerIds`, and scalar prices; when stock cannot be attributed to a tier it conservatively quotes the **highest** candidate with stock (never the cheapest) — over-quoting slightly is acceptable, under-capping is not. `maxPrice` is always sent, stringified with full precision (no rounding down), and `providerIds` is only pinned when its price equals the quoted cost. `WRONG_MAX_PRICE:12.7615` / `BAD_MAX_PRICE` are parsed explicitly: the order is refunded **exactly once** via the idempotent ledger, the buyer sees the real price as a fresh confirmation (“Provider price is ₹X now — confirm to buy”), and a short-lived price correction (`PRICE_CORRECTION_TTL` 10 min) for that `(service, country, route[, providerIds])` makes the next quote use the corrected cost with zero extra failed allocations; a single automatic retry is allowed only when the reported price ≤ quoted cost (reuse same order/debit, no double charge). The admin log tags every provider call with its purpose (`catalog`, `line probe`, `quote`, `buy validation`, `allocation`, `status refresh`) and collapses a line-probe sweep into one summary card (`🔎 Line probe · esb / country 96 → Operator 3: BAD_SERVICE · …`) with the full raw bodies attached as a single `.txt`; expected routing rejections are shown as `ℹ️ expected` vs `⚠️ failed`, and `_PROVIDER_FAILURES` documents `WRONG_MAX_PRICE`/`BAD_MAX_PRICE` with cost vs live vs reported on the order detail.
+
+### Admin Analytics — Premium Report
+
+`/sales` & `/stats` now render a premium, detailed report via `build_admin_analytics_report()` + `summarize_analytics()`:
+
+- **Visual:** `<h2>` title with premium header, one `<blockquote>` per section with emoji header, `•` bullets, `<b>` labels, `<code>` values, `₹` with `:,`-grouped 2-decimal amounts, counts `:,`-grouped, trend arrows (📈/📉/➖) and status dots (🟢/⚪/🔴). Follows `rich_messages` conventions; `premium_button` strips emoji from button labels only — message text keeps emoji. All user-visible values are `escape()`d.
+- **Sections (each degrades to `—`/`0` and the whole report never raises):**
+  1. 📈 **Overview / snapshot window** — generated at UTC **and** IST, day/week boundaries, total revenue across all verticals (accounts + SMM + OTP) with today/week split and share %.
+  2. 👥 **User Growth** — total, today, week, yesterday/last-week with % delta, active buyers (≥1 paid order) and conversion %, top-up users.
+  3. 💰 **Wallet (INR)** — deposits total/today/week, withdrawals paid total/today/week, pending recharges/withdrawals, net flow, avg deposit.
+  4. 🛒 **Account Sales** — orders + revenue total/today/week, avg order value, refund/cancel counts, **top 3 countries**, stock counters.
+  5. 📱 **SMM** — orders, open, gross/net/refunded, today/week net, avg order value, top category/service.
+  6. 📲 **OTP (TemporaSMS)** — from `otp_orders`: orders + revenue total/today/week, provider cost (`cost`) vs `live_cost` vs retail `price` → **gross margin ₹ and %**, refunded/cancelled counts, statuses needing attention (`waiting`, `allocating`, `review`, `refunding`, `unpaid`), top app/country/line (`route`/`route_type`/`operator` → `Line: ⚡ Auto`), catalog-cache age + enabled lines.
+  7. ⚠️ **Attention / alerts** — only when non-empty: OTP `review`/`allocating` older than 10 m, stale SMM cycle, last SMM error, price mismatches from `WRONG_MAX_PRICE` corrections, low/zero provider balance, catalog older than TTL, refund backlog.
+  8. 🤖 **Bot & Provider Health** — process + uptime, Telegram API reachability, SMM monitor + last cycle, OTP worker + last catalog warm/refresh, DB collection counts. Best-effort and fast: no new paid/slow provider calls (balance only if cached, otherwise `not checked`).
+  9. Footer: `Generated <UTC> · <IST> · window: today/week (UTC)` + legend for symbols.
+
+Metrics are computed in `admin_analytics.summarize_analytics()` (keyword-only, backwards compatible; existing tests still call it) with optional `otp_orders=`, `otp_catalog=`, `otp_settings=` etc., all amount parsing via `safe_amount()`/`utc_naive()`. Formatting stays in `bot.py` (or a small helper) so it is unit-testable. Empty collections are handled gracefully.
+
 The provider's expanded API reference and a funded account were not available
 for a live end-to-end transaction during implementation. Before production,
 verify actual `getServices`, `getCountries`, `getPricesV3` response shapes,

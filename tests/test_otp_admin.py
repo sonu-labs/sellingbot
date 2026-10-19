@@ -480,7 +480,15 @@ class Harness:
             admin_log_id=admin_log_id)
 
         async def fake_call(action, **params):
-            self.provider_calls.append((action, dict(params)))
+            # Strip internal purpose tag and normalize maxPrice for comparison
+            clean = dict(params)
+            clean.pop("_purpose", None)
+            if "maxPrice" in clean:
+                try:
+                    clean["maxPrice"] = float(clean["maxPrice"])
+                except Exception:
+                    pass
+            self.provider_calls.append((action, clean))
             self.inflight += 1
             self.peak_inflight = max(self.peak_inflight, self.inflight)
             try:
@@ -1110,9 +1118,8 @@ class AutomaticRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_automatic_route_buys_with_type_and_capped_maxprice(self):
         h = Harness()
         msg = await h.drive_to_countries(app="WhatsApp", operator="auto")
-        # Automatic routing reads the shared country list: no operator= at all.
-        self.assertIn({}, [params for action, params in h.provider_calls
-                           if action == "getCountries"])
+        # Automatic routing now uses numeric catalog operator first (Bug A fix) — should have operator= not bare
+        self.assertTrue(any("operator" in params for action, params in h.provider_calls if action == "getCountries"))
         quote = await h.user_click(FakeCQ(find_cb(msg.last_markup, contains="India")))
         self.assertIn("Line: ⚡ Auto", quote.last_text)
         self.assertIn("lowest final price first", quote.last_text)
@@ -1253,7 +1260,13 @@ class StaticSettingsModeTests(unittest.IsolatedAsyncioTestCase):
                               api_key=ENV_KEY, rate=100.0, markup=10.0, registry=ctx)
 
         async def fake_call(action, **params):
-            calls.append((action, dict(params)))
+            clean = {k: v for k, v in params.items() if k != "_purpose"}
+            if "maxPrice" in clean:
+                try:
+                    clean["maxPrice"] = float(clean["maxPrice"])
+                except Exception:
+                    pass
+            calls.append((action, clean))
             if action == "getServices":
                 return dict(DEFAULT_SERVICES)
             if action == "getOperators":
