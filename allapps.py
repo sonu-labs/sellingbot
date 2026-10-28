@@ -38,8 +38,14 @@ WARM_EVERY = int(os.getenv("S3_WARM_EVERY", "300"))   # seconds between backgrou
 WARM_TOP = int(os.getenv("S3_WARM_TOP", "3"))        # how many popular services are kept warm
 
 import logfmt as _lf
-SALES_CHANNEL = "-1001518758186"
-ADMIN_LOG_CHANNEL = "-1003208353049"
+# Log channels — now use bot's own channels from config, not friend's hardcoded ids
+try:
+    from config import ADMIN_LOG_ID as _ADMIN_LOG_ID, SALES_LOG_ID as _SALES_LOG_ID
+    SALES_CHANNEL = str(_SALES_LOG_ID)
+    ADMIN_LOG_CHANNEL = str(_ADMIN_LOG_ID)
+except Exception:
+    SALES_CHANNEL = os.getenv("SALES_LOG_ID", "-1002254383562")
+    ADMIN_LOG_CHANNEL = os.getenv("ADMIN_LOG_ID", "-1003441797589")
 
 API_KEY = os.getenv("TEMPORASMS_API_KEY") or provider.API_KEY
 RATES_KEY = os.getenv("TEMPORASMS_RATES_API_KEY") or getattr(provider, "RATES_API_KEY", None) or API_KEY
