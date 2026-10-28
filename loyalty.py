@@ -1,0 +1,2 @@
+"""Stub loyalty module."""
+pass

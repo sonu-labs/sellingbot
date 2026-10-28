@@ -36,10 +36,10 @@ import random
 from aiogram.types import InputMediaVideo
 from admin_analytics import summarize_analytics, utc_naive
 from recharge_flow import register_recharge_handlers
-from otp import register_otp_handlers
-from otp_admin import register_otp_admin_handlers
 from smm import register_smm_handlers
 from server3 import register_server3_handlers
+from allapps import register_server3_handlers as register_allapps_handlers
+from server4 import register_server4_handlers
 from mustjoin import (
     check_join,
     get_force_sub_channels,
@@ -752,7 +752,7 @@ def build_main_menu(user_id: int, full_name: str) -> tuple[str, InlineKeyboardMa
         premium_button(text=f"💳 {tr(user, 'recharge')}", callback_data="recharge"),
         premium_button(text=f"👤 {tr(user, 'account')}", callback_data="stats"),
     ])
-    rows.append([premium_button(text="📲 Buy OTPs (All Apps)", callback_data="otp:open")])
+    rows.append([premium_button(text="📲 Buy OTPs (All Apps)", callback_data="s3_user_root")])
     if features.get("smm_enabled", True):
         rows.append([premium_button(text=f"🚀 {tr(user, 'smm')}", callback_data="smm_open")])
 
@@ -1305,6 +1305,7 @@ async def callback_buy_main(cq: CallbackQuery):
     s1 = settings.get("s1", "active")
     s2 = settings.get("s2", "active")
     s3 = settings.get("s3", "maintenance")
+    s4 = settings.get("s4", "active")
 
     text = (
         f"<h2>{tg_icon()} Buy Telegram Accounts</h2>"
@@ -1336,6 +1337,12 @@ async def callback_buy_main(cq: CallbackQuery):
         kb.row(premium_button(text="✈️ Server 3 — Instant Global & LZT", callback_data="s3tg_open", icon_custom_emoji_id=TELEGRAM_EMOJI_ID))
     else:
         kb.row(InlineKeyboardButton(text="🛠️ Server 3 [Maintenance]", callback_data="server_maintenance"))
+
+    # S4 Route — New Numbers (Telegram-only TemporaSMS)
+    if s4 == "active":
+        kb.row(premium_button(text="✈️ Server 4 — New Numbers (Telegram)", callback_data="s4_open", icon_custom_emoji_id=TELEGRAM_EMOJI_ID))
+    else:
+        kb.row(InlineKeyboardButton(text="🛠️ Server 4 [Maintenance]", callback_data="server_maintenance"))
 
     kb.row(InlineKeyboardButton(text="⬅️ Back to Menu", callback_data="back_main"))
 
@@ -4760,6 +4767,7 @@ async def send_server_dashboard(chat_id, message_id=None):
     s1 = settings.get("s1", "active")
     s2 = settings.get("s2", "active")
     s3 = settings.get("s3", "maintenance")
+    s4 = settings.get("s4", "active")
     active_api = settings.get("s2_api", "tgpva") # tglion or tgpva
     profit = settings.get("s2_profit", 0)
 
@@ -4771,7 +4779,8 @@ async def send_server_dashboard(chat_id, message_id=None):
         f"<blockquote>{tg_icon()} <b>Server Routing Status</b><br>"
         f"• <b>Server 1 (Aged):</b> <code>{s1.upper()}</code><br>"
         f"• <b>Server 2 (High Quality):</b> <code>{s2.upper()}</code><br>"
-        f"• <b>Server 3 (Global &amp; LZT):</b> <code>{s3.upper()}</code></blockquote>"
+        f"• <b>Server 3 (Global &amp; LZT):</b> <code>{s3.upper()}</code><br>"
+        f"• <b>Server 4 (New Numbers):</b> <code>{s4.upper()}</code></blockquote>"
         f"<blockquote>⚙️ <b>Server 2 Configuration</b><br>"
         f"• <b>Active Provider:</b> <code>{active_api.upper()}</code><br>"
         f"• <b>Profit Margin:</b> <code>{profit}%</code></blockquote>"
@@ -4781,11 +4790,14 @@ async def send_server_dashboard(chat_id, message_id=None):
     )
 
     kb = InlineKeyboardBuilder()
-    # Toggles for S1, S2, S3
+    # Toggles for S1, S2, S3, S4
     kb.row(
         InlineKeyboardButton(text=f"S1: {'🟢 ON' if s1=='active' else '🔴 OFF'}", callback_data="toggle_s1"),
         InlineKeyboardButton(text=f"S2: {'🟢 ON' if s2=='active' else '🔴 OFF'}", callback_data="toggle_s2"),
         InlineKeyboardButton(text=f"S3: {'🟢 ON' if s3=='active' else '🔴 OFF'}", callback_data="toggle_s3")
+    )
+    kb.row(
+        InlineKeyboardButton(text=f"S4: {'🟢 ON' if s4=='active' else '🔴 OFF'}", callback_data="toggle_s4"),
     )
     # API Switcher & Profit
     kb.row(
@@ -4807,7 +4819,7 @@ async def send_server_dashboard(chat_id, message_id=None):
         await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb.as_markup())
 
 # Callbacks for toggles
-@dp.callback_query(F.data.in_(["toggle_s1", "toggle_s2", "toggle_s3", "switch_s2_api", "refresh_dashboard"]))
+@dp.callback_query(F.data.in_(["toggle_s1", "toggle_s2", "toggle_s3", "toggle_s4", "switch_s2_api", "refresh_dashboard"]))
 async def manage_toggles(cq: CallbackQuery):
     if not is_admin(cq.from_user.id):
         return await cq.answer("Not authorized.", show_alert=True)
@@ -4820,6 +4832,8 @@ async def manage_toggles(cq: CallbackQuery):
         settings["s2"] = "maintenance" if settings.get("s2", "active") == "active" else "active"
     elif action == "toggle_s3":
         settings["s3"] = "maintenance" if settings.get("s3", "maintenance") == "active" else "active"
+    elif action == "toggle_s4":
+        settings["s4"] = "maintenance" if settings.get("s4", "active") == "active" else "active"
     elif action == "switch_s2_api":
         settings["s2_api"] = "tglion" if settings.get("s2_api", "tgpva") == "tgpva" else "tgpva"
     
@@ -6704,20 +6718,33 @@ s3_send_countries_message = register_server3_handlers(
     SALES=SALES, TEMPORASMS_API_KEY=TEMPORASMS_API_KEY,
     BOTUSER=BOTUSER, CHANNEL=CHANNEL
 )
-OTP_ENV_MARKUP = float(os.getenv("OTP_MARKUP_PERCENT", "0"))
+# --- All Apps OTP (new allapps.py replaces old otp.py) ---
+def _allapps_is_admin(uid: int) -> bool:
+    return is_admin(uid)
+def _allapps_fmt_curr(v) -> str:
+    try:
+        return f"₹{float(v):.2f}"
+    except Exception:
+        return str(v)
+allapps_root = register_allapps_handlers(
+    dp=dp, bot=bot, db=db, users_col=users_col, orders_col=orders_col,
+    is_admin_func=_allapps_is_admin, fmt_curr_func=_allapps_fmt_curr
+)
+# --- Server 4 — New Numbers (Telegram-only via TemporaSMS) ---
+def _s4_is_admin(uid: int) -> bool:
+    return is_admin(uid)
+def _s4_fmt_curr(v) -> str:
+    try:
+        return f"₹{float(v):.2f}"
+    except Exception:
+        return str(v)
+server4_root = register_server4_handlers(
+    dp=dp, bot=bot, db=db, users_col=users_col, orders_col=orders_col,
+    is_admin_func=_s4_is_admin, fmt_curr_func=_s4_fmt_curr
+)
+# Old OTP handlers removed — allapps.py now serves All Apps OTP
+otp_background_task = None
 otp_ctx = {}
-otp_background_task = register_otp_handlers(
-    dp=dp, bot=bot, db=db, users_col=users_col,
-    api_key=TEMPORASMS_API_KEY, rate=USD_TO_INR,
-    markup=OTP_ENV_MARKUP,
-    settings_col=settings_col, registry=otp_ctx,
-)
-register_otp_admin_handlers(
-    dp=dp, bot=bot, db=db, users_col=users_col, settings_col=settings_col,
-    admin_ids=ADMIN_IDS, env_api_key=TEMPORASMS_API_KEY,
-    env_markup=OTP_ENV_MARKUP, rate=USD_TO_INR, otp_ctx=otp_ctx,
-    admin_log_id=ADMINLOG,
-)
 # ===== Bot Runner =====
 async def main():
     global BOT_STARTED_AT, SMM_BACKGROUND_TASK
@@ -6747,12 +6774,15 @@ async def main():
     start_auto_sweeper()  # launches the UPI/FamPay background auto-verify loop
     SMM_BACKGROUND_TASK = asyncio.create_task(smm_background_task(), name="smm-order-status-checker")
 
-    otp_task = asyncio.create_task(otp_background_task(), name="otp-status-checker")
+    otp_task = None
+    if otp_background_task:
+        otp_task = asyncio.create_task(otp_background_task(), name="otp-status-checker")
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        otp_task.cancel()
-        await asyncio.gather(otp_task, return_exceptions=True)
+        if otp_task:
+            otp_task.cancel()
+            await asyncio.gather(otp_task, return_exceptions=True)
 
 if __name__ == "__main__":
     import traceback
