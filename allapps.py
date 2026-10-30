@@ -1164,15 +1164,17 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
 
     BUSY_TXT = "⚠️ <b>Provider is busy right now</b>\nLive rates could not be loaded. You were not charged — please try again in a moment."
 
+    def _entry_name(entry):
+        if isinstance(entry, dict):
+            return entry.get("name", "") or entry.get("title", "") or entry.get("service", "")
+        return str(entry or "")
+
     def primary_service_sid(cat, wanted):
         target = norm(wanted)
-        # Exact name wins. This avoids showing a similarly named WhatsApp
-        # provider entry with only one country when the real "WhatsApp"
-        # service is available in the catalog.
         for sid, entry in cat.items():
-            if norm(entry.get("name", "")) == target:
+            if norm(_entry_name(entry)) == target:
                 return sid
-        matches = [(sid, e) for sid, e in cat.items() if target in norm(e.get("name", ""))]
+        matches = [(sid, e) for sid, e in cat.items() if target in norm(_entry_name(e))]
         return matches[0][0] if matches else None
 
     async def render_root(target):
@@ -1206,7 +1208,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             # Users can still find it through Search All Services if it exists
             # in the provider catalog.
             entry = cat.get(sid, {}) or {}
-            service_name = norm(entry.get("name", "") or label)
+            service_name = norm(_entry_name(entry) or label)
             if service_name in {"whatsapp business", "wa business", "whatsappbusiness"}:
                 continue
             if sid not in seen:
