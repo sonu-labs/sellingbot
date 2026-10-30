@@ -1098,11 +1098,17 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             ("getServiceList op=1", dict(action="getServiceList", operator="1")),
         ]
         t0 = time.time()
-        raws = await asyncio.gather(*[client.call(**p) for _, p in checks])
+        raws = await asyncio.gather(*[client.call(**p) for _, p in checks], return_exceptions=True)
         await call.message.answer(premiumize_text(f"🧪 Probe finished in {time.time() - t0:.1f}s"), parse_mode="HTML")
         for (label, _), raw in zip(checks, raws):
+            if isinstance(raw, Exception):
+                display = f"ERROR: {type(raw).__name__}: {raw}"
+                if hasattr(raw, "code") and raw.code:
+                    display += f" (code={raw.code})"
+            else:
+                display = (raw or 'NO RESPONSE')[:700]
             await call.message.answer(
-                premiumize_text(f"<b>{escape(label)}</b>\n<pre>{escape((raw or 'NO RESPONSE')[:700])}</pre>"),
+                premiumize_text(f"<b>{escape(label)}</b>\n<pre>{escape(display)}</pre>"),
                 parse_mode="HTML"
             )
 
@@ -1170,7 +1176,15 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
 
     async def render_root(target):
         """Server 4 (New Numbers) is Telegram-only — directly show Telegram countries."""
-        cat = await client.services()
+        try:
+            cat = await client.services()
+        except Exception as e:
+            code = getattr(e, "code", None)
+            if code == "BAD_KEY":
+                msg = "❌ <b>Provider API key invalid</b>\nCheck TEMPORASMS_API_KEY and refresh."
+            else:
+                msg = f"⚠️ <b>Provider unavailable</b>\n<code>{escape(str(e)[:300])}</code>\nTry again shortly."
+            return await edit(target, msg, busy_kb("s4_user_root", "back_main"))
         sid = primary_service_sid(cat, "Telegram")
         if not sid:
             return await edit(target, "❌ Telegram service is currently unavailable on Server 4.\nPlease try again later.", InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Back", "back_main", style="danger")]]))
@@ -1292,11 +1306,11 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         await call.answer()
 
         help_text = (
-            "ℹ️ <b>About Server 4/ vth panel Virtual Number Activation</b>\n"
+            "ℹ️ <b>About TGA Store Virtual Number Service</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
 
             "<b>What Services Are Provided?</b>\n"
-            "Server 4 / All apps acc connects directly to <b>VTH Panel</b> global carrier "
+            "TGA Store Virtual Number Service connects directly to global carrier "
             "telecom routes, providing fresh, private, disposable mobile "
             "numbers across <b>200+ countries</b> to receive SMS "
             "verification codes &amp; OTPs.\n\n"

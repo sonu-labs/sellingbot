@@ -147,7 +147,12 @@ async def check_join(client, event) -> bool:
                 break
             # The bot cannot verify this channel (missing admin rights, unknown
             # chat, transient failure) — do not punish the user for it.
-            log.warning("force-sub: cannot verify membership for %s: %s", ch.get("id"), exc)
+            # Common case: bot is not admin in private channel (-1003...) -> Telegram returns
+            # "Bad Request: member list is inaccessible" - downgrade to DEBUG to avoid log spam.
+            if any(marker in desc for marker in ("member list is inaccessible", "chat not found", "channel not found", "peer_id_invalid", "chat_id_invalid", "bad request: channel not found", "bad request: chat not found")):
+                log.debug("force-sub: cannot verify membership for %s (bot not admin or private): %s", ch.get("id"), exc)
+            else:
+                log.warning("force-sub: cannot verify membership for %s: %s", ch.get("id"), exc)
             continue
         status = getattr(member, "status", None)
         if status in {"left", "kicked"}:
