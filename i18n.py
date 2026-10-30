@@ -324,7 +324,20 @@ TEXT = {
 
 def tr(user: dict | None, key: str) -> str:
     lang = (user or {}).get("language", "en")
-    return TEXT.get(lang, TEXT["en"]).get(key, TEXT["en"].get(key, key))
+    return TEXT.get(lang, TEXT["en"]).get(key, TEXT["en"].get(key, _EXTRA_DEFAULTS.get(key, key)))
+
+
+_EXTRA_DEFAULTS = {
+    "wp_maint": "WhatsApp service is currently under maintenance. Please try again later!",
+    "wp_unavailable": "WhatsApp is not available right now.",
+    "wp_opening": "Fetching live WhatsApp rates…",
+    "wp_rates_busy": "WhatsApp live rates are temporarily busy. Please tap Try again.",
+}
+
+
+def t(key: str, user: dict | None = None) -> str:
+    """Compatibility helper used by allapps.py and server4.py."""
+    return tr(user, key)
 
 
 def format_balance(user: dict | None, amount_inr: float | None = None) -> str:

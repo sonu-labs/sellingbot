@@ -19,11 +19,15 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+try:
+    from config import USD_TO_INR
+except Exception:
+    USD_TO_INR = float(os.getenv("USD_TO_INR", "100"))
 import provider
 import i18n as _i18n
 from tempora import (
     TemporaClient, ProviderUnavailable, retail_price, cost_inr, search_services, popular_services,
-    sid_of, norm, PRIORITY_COUNTRIES, LEGACY_NAMES,
+    sid_of, norm, entry_name, PRIORITY_COUNTRIES, LEGACY_NAMES,
 )
 
 # ---------------- tunables ----------------
@@ -41,16 +45,35 @@ import logfmt as _lf
 # Log channels — now use bot's own channels from config, not friend's hardcoded ids
 try:
     from config import ADMIN_LOG_ID as _ADMIN_LOG_ID, SALES_LOG_ID as _SALES_LOG_ID
-    SALES_CHANNEL = str(_SALES_LOG_ID)
-    ADMIN_LOG_CHANNEL = str(_ADMIN_LOG_ID)
+    SALES_CHANNEL = _SALES_LOG_ID
+    ADMIN_LOG_CHANNEL = _ADMIN_LOG_ID
 except Exception:
     SALES_CHANNEL = os.getenv("SALES_LOG_ID", "-1002254383562")
     ADMIN_LOG_CHANNEL = os.getenv("ADMIN_LOG_ID", "-1003441797589")
 
-API_KEY = os.getenv("TEMPORASMS_API_KEY") or provider.API_KEY
-RATES_KEY = os.getenv("TEMPORASMS_RATES_API_KEY") or getattr(provider, "RATES_API_KEY", None) or API_KEY
+_db_api_key_getter = None
+
+
+def _resolve_purchase_key() -> str:
+    if callable(_db_api_key_getter):
+        try:
+            k = (_db_api_key_getter() or "").strip()
+            if k:
+                return k
+        except Exception:
+            pass
+    return (os.getenv("TEMPORASMS_API_KEY") or provider.API_KEY or "").strip()
+
+
+def _resolve_rates_key() -> str:
+    rk = (os.getenv("TEMPORASMS_RATES_API_KEY") or getattr(provider, "RATES_API_KEY", None) or "").strip()
+    return rk or _resolve_purchase_key()
+
+
+API_KEY = _resolve_purchase_key()
+RATES_KEY = _resolve_rates_key()
 # purchase lane = API_KEY, live-rates lane = RATES_KEY (separate pools, separate concurrency limits)
-client = TemporaClient(API_KEY, provider.BASE_URL, rates_key=RATES_KEY)
+client = TemporaClient(_resolve_purchase_key, provider.BASE_URL, rates_key=_resolve_rates_key)
 
 # ---------------------------------------------------------------------
 # Server 4 TemporaSMS rate cache
@@ -189,7 +212,7 @@ DEFAULT_CFG = {
     "wa_markup_pct": 100.0,
     "other_markup_pct": 100.0,
     "min_profit": 10.0,
-    "unit_to_inr": 1.0,
+    "unit_to_inr": USD_TO_INR,
     "legacy_prices": False,
     "category_pricing": True,
 }
@@ -302,6 +325,7 @@ CUSTOM_FLAG_EMOJI_IDS = {
     "HR": "5291999676948569127",
     "HT": "5292045130587462814",
     "HU": "5294229581018975260",
+    "ID": "5294378161117614233",
     "IE": "5294471971793293647",
     "IL": "5294069056616289553",
     "IM": "5294318478252070646",
@@ -560,9 +584,9 @@ WHATSAPP_SECURITY_TIPS = (
 
 # Shown above the country list when the user opens the Telegram service (Server 4).
 TELEGRAM_SERVICE_NOTE = (
-    "<blockquote>⚠️ <b>Use this service only for Telegram number change.</b>\n"
-    "🛒 To buy ready-made Telegram accounts use <b>Server 2</b> (good quality) "
-    "or <b>Server 4</b> (cheap price, low quality).</blockquote>"
+    "<blockquote>✈️ <b>Telegram — Fresh Virtual Numbers (Server 4)</b>\n"
+    "💯 Instant SMS OTP delivery · <b>100% auto refund</b> if no code arrives in 5 minutes.\n"
+    "💡 <i>For ready-made logged-in Telegram accounts, check Server 1, Server 2, or Server 3.</i></blockquote>"
 )
 
 
@@ -582,11 +606,11 @@ def flag_for(name: str) -> str:
             except Exception:
                 pass
         try:
-            # Server 4 can be imported either as Bot.server3 or as a top-level module.
+            # Load comprehensive country flag map from server3.py
             try:
-                from .server4 import LZT_COUNTRY_MAP, flag_emoji
+                from .server3 import LZT_COUNTRY_MAP, flag_emoji
             except (ImportError, ValueError):
-                from server4 import LZT_COUNTRY_MAP, flag_emoji
+                from server3 import LZT_COUNTRY_MAP, flag_emoji
             for _code, (a2, n) in LZT_COUNTRY_MAP.items():
                 nn = norm(n)
                 _flag_cache.setdefault(nn, flag_emoji(a2))
@@ -639,7 +663,7 @@ def premium_button_parts(text, **kwargs):
 
 async def edit(target, text, kb=None):
     """Edit in place; ignore 'message is not modified'."""
-    m = target.message if isinstance(target, CallbackQuery) else target
+    m = target.message if isinstance(target, CallbackQuery) or (hasattr(target, "message") and not hasattr(target, "edit_text")) else target
     try:
         await m.edit_text(premiumize_text(text), reply_markup=kb, parse_mode="HTML")
     except TelegramBadRequest as e:
@@ -669,8 +693,27 @@ def short(n: float) -> str:
 # =====================================================================
 def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_col, is_admin_func, fmt_curr_func):
     s4_settings = db["server4_settings"]
+    global_settings_col = db["settings"]
     tasks_col = db["server4_tasks"]
     _bg = set()
+
+    _key_cache = {"t": 0.0, "k": ""}
+
+    def _read_db_tempora_key() -> str:
+        now = time.time()
+        if now - _key_cache["t"] < 5.0:
+            return _key_cache["k"]
+        try:
+            doc = global_settings_col.find_one({"_id": "otp_services"}) or {}
+            k = str(doc.get("tempora_api_key") or "").strip()
+        except Exception:
+            k = ""
+        _key_cache["t"] = now
+        _key_cache["k"] = k
+        return k
+
+    global _db_api_key_getter
+    _db_api_key_getter = _read_db_tempora_key
 
     def spawn(coro):
         """create_task that cannot be garbage-collected mid-flight (paid OTP workers must never vanish)."""
@@ -716,7 +759,12 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         try:
             doc = s4_settings.find_one({"_id": "config"}) or {}
             m = s4_settings.find_one({"_id": "maintenance_config"}) or {}
-            _sc.update(t=time.time(), maint=bool(m.get("enabled", False)),
+            srv_cfg = global_settings_col.find_one({"_id": "server_config"}) or {}
+            s4_srv_val = srv_cfg.get("s4", "active")
+            s4_disabled_in_srv_cfg = (s4_srv_val is False) or (
+                isinstance(s4_srv_val, str) and s4_srv_val.lower() in ("maintenance", "off", "disabled", "false")
+            )
+            _sc.update(t=time.time(), maint=bool(m.get("enabled", False)) or s4_disabled_in_srv_cfg,
                        cfg={**DEFAULT_CFG, **{k: v for k, v in doc.items() if k != "_id"}})
         except Exception as e:
             print(f"[server4] settings read failed: {e!r}")
@@ -816,7 +864,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             [btn("🔄 Refresh Catalog", "s4_adm_refresh")],
             [btn(f"{status} — Click to {'Disable' if active else 'Enable'}", "s4_adm_toggle_maint")],
             [btn("🧪 Probe API", "s4_adm_probe")],
-            [btn("❌ Close", "admin_back")],
+            [btn("⬅️ Back to Admin", "admin_refresh")],
         ])
 
     def admin_text():
@@ -834,7 +882,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             "<i>Use the buttons below to manage Server 4. No pricing command is required.</i>"
         )
 
-    @dp.message(Command("server3"))
+    @dp.message(Command("server4"))
     async def admin_panel(msg: Message):
         if not is_admin_func(msg.from_user.id):
             return await msg.answer(premiumize_text("❌ Not authorized."))
@@ -861,6 +909,8 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         new_disabled = not is_maintenance_active()
         await dbq(s4_settings.update_one, {"_id": "maintenance_config"},
                   {"$set": {"enabled": new_disabled}}, upsert=True)
+        await dbq(global_settings_col.update_one, {"_id": "server_config"},
+                  {"$set": {"s4": "maintenance" if new_disabled else "active"}}, upsert=True)
         bump_settings()
         await call.answer("Server 4 disabled" if new_disabled else "Server 4 enabled", show_alert=False)
         await edit(call, admin_text(), admin_kb())
@@ -1150,12 +1200,8 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
     # =================================================================
     #                       USER: SCREENS
     # =================================================================
-    _pop = {"id": None, "v": None}
-
     def popular_cached(cat):
-        if _pop["id"] != id(cat):
-            _pop.update(id=id(cat), v=popular_services(cat))
-        return _pop["v"]
+        return popular_services(cat)
 
     def busy_kb(retry_cb, back_cb):
         return InlineKeyboardMarkup(inline_keyboard=[[btn("🔄 Try again", retry_cb, style="success")],
@@ -1164,9 +1210,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
     BUSY_TXT = "⚠️ <b>Provider is busy right now</b>\nLive rates could not be loaded. You were not charged — please try again in a moment."
 
     def _entry_name(entry):
-        if isinstance(entry, dict):
-            return entry.get("name", "") or entry.get("title", "") or entry.get("service", "")
-        return str(entry or "")
+        return entry_name(entry)
 
     def primary_service_sid(cat, wanted):
         target = norm(wanted)
@@ -1187,19 +1231,25 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             code = getattr(e, "code", None)
             if code == "BAD_KEY":
                 msg = "❌ <b>Provider API key invalid</b>\nCheck TEMPORASMS_API_KEY and refresh."
+            elif code == "NOT_CONFIGURED":
+                msg = "❌ <b>Provider API key not configured</b>\nSet TEMPORASMS_API_KEY (or configure via /otpadmin) and retry."
             else:
-                msg = f"⚠️ <b>Provider unavailable</b>\n<code>{escape(str(e)[:300])}</code>\nTry again shortly."
-            return await edit(target, msg, busy_kb("s4_user_root", "back_main"))
+                msg = BUSY_TXT
+            return await edit(target, msg, busy_kb("s4_open", "buy"))
         sid = primary_service_sid(cat, "Telegram")
         if not sid:
-            return await edit(target, "❌ Telegram service is currently unavailable on Server 4.\nPlease try again later.", InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Back", "back_main", style="danger")]]))
+            return await edit(target, "❌ Telegram service is currently unavailable on Server 4.\nPlease try again later.",
+                              InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Back", "buy", style="danger")]]))
         # Delegate to country list (full scan, fast display)
         await render_countries(target, sid, 0, full=True, fast=True)
 
     async def open_service_direct(msg: Message, wanted: str):
         if is_maintenance_active():
             return await msg.answer(premiumize_text("⚠️ Server 4 is under maintenance. Please try again later!"), parse_mode="HTML")
-        cat = await client.services()
+        try:
+            cat = await client.services()
+        except ProviderUnavailable:
+            return await msg.answer(premiumize_text(BUSY_TXT), reply_markup=busy_kb("s4_open", "buy"), parse_mode="HTML")
         sid = primary_service_sid(cat, wanted)
         if not sid:
             return await msg.answer(premiumize_text(f"❌ {escape(wanted)} is not available on Server 4 right now."), parse_mode="HTML")
@@ -1223,29 +1273,14 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
                     await edit(screen,
                                f"⚠️ <b>{escape(wanted)}</b> rates are temporarily unavailable.\n"
                                "Please tap Refresh to try again.",
-                               busy_kb(f"s4r:{sid}", "s4_user_root"))
+                               busy_kb(f"s4r:{sid}", "buy"))
                 except Exception:
                     pass
         spawn(_load_direct_service())
 
-    @dp.message(Command("wp"))
-    async def direct_whatsapp(msg: Message):
-        await open_service_direct(msg, "WhatsApp")
-
-    @dp.message(Command("tg"))
-    async def direct_telegram(msg: Message):
+    @dp.message(Command("s4"))
+    async def direct_server4_telegram(msg: Message):
         await open_service_direct(msg, "Telegram")
-
-    @dp.message(Command("allapp"))
-    async def direct_all_apps(msg: Message):
-        if is_maintenance_active():
-            return await msg.answer(premiumize_text("⚠️ Server 4 is under maintenance. Please try again later!"), parse_mode="HTML")
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-        screen = await msg.answer(premiumize_text("⏳ <i>Opening Server 4…</i>"), parse_mode="HTML")
-        await render_root(screen)
 
     # "Buy WhatsApp Account" on the home screen -> terms page -> "Agree & Continue" lands here.
     # Opens the WhatsApp section of the All-apps OTP panel in place (no typing, no /wp needed).
@@ -1281,12 +1316,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         if is_maintenance_active():
             return await call.answer("⚠️ Server 4 is under maintenance. Please try again later!", show_alert=True)
         await call.answer()
-        # Server 4 is Telegram-only — bypass app grid
-        cat = await client.services()
-        sid = primary_service_sid(cat, "Telegram")
-        if not sid:
-            return await edit(call, "❌ Telegram service is currently unavailable on Server 4.", InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Back", "back_main", style="danger")]]))
-        await render_countries(call, sid, 0, full=True, fast=True)
+        await render_root(call)
 
     @scb(F.data == "s4_open")
     async def s4_open(call: CallbackQuery, state: FSMContext):
@@ -1294,11 +1324,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         if is_maintenance_active():
             return await call.answer("⚠️ Server 4 is under maintenance. Please try again later!", show_alert=True)
         await call.answer()
-        cat = await client.services()
-        sid = primary_service_sid(cat, "Telegram")
-        if not sid:
-            return await edit(call, "❌ Telegram service is currently unavailable on Server 4.", InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Back", "back_main", style="danger")]]))
-        await render_countries(call, sid, 0, full=True, fast=True)
+        await render_root(call)
 
     # legacy buttons from messages sent before the redesign -> just show the new menu
     @scb(F.data.startswith(("s4_usrsrv:", "s4_country:", "s4_buy_ask:", "s4_buy_terms:", "s4_search_prompt:")))
@@ -1359,7 +1385,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
     # ---- browse all ----
     async def render_browse(target, page):
         cat = await client.services()
-        items = sorted(cat.items(), key=lambda kv: kv[1]["name"].lower())
+        items = sorted(cat.items(), key=lambda kv: entry_name(kv[1], kv[0]).lower())
         pages = max(1, (len(items) + SERVICES_PER_PAGE - 1) // SERVICES_PER_PAGE)
         page = max(0, min(page, pages - 1))
         chunk = items[page * SERVICES_PER_PAGE:(page + 1) * SERVICES_PER_PAGE]
@@ -1367,7 +1393,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
                 f"<i>Page {page + 1} of {pages}</i>\nTap any service to see countries &amp; live pricing:")
         kb = InlineKeyboardBuilder()
         for sid, e in chunk:
-            kb.button(text=e["name"][:28], callback_data=f"s4s:{sid}:0")
+            kb.button(text=entry_name(e, sid)[:28], callback_data=f"s4s:{sid}:0")
         kb.adjust(2)
         nav = []
         if page > 0:
@@ -1416,7 +1442,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             text = f"🔎 <b>Results for “{escape(q[:40])}”</b> — {len(results)} found\nTap a service:"
             b = InlineKeyboardBuilder()
             for sid, e in results[:20]:
-                b.button(text=e["name"][:28], callback_data=f"s4s:{sid}:0")
+                b.button(text=entry_name(e, sid)[:28], callback_data=f"s4s:{sid}:0")
             b.adjust(2)
             b.row(btn("🔎 Search Again", "s4q", style="success"), btn("⬅️ Back", "s4_user_root", style="danger"))
             kb = b.as_markup()
@@ -1440,7 +1466,8 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         svc = cat.get(sid)
         if not svc:
             return await render_root(target)
-        title = escape(svc["name"])
+        svc_title = entry_name(svc, sid)
+        title = escape(svc_title)
         # fast=True (WhatsApp / direct opens): never make the user wait for the ~200-country scan.
         # Show the priority countries instantly and warm the full list in the background.
         if full and fast and not _cache_fresh(_s4_offer_cache.get((sid, True)), RATE_CACHE_TTL) \
@@ -1457,12 +1484,12 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
                 rows = await asyncio.wait_for(country_rows(sid, full=full), 25)
         except (ProviderUnavailable, asyncio.TimeoutError):
             return await edit(target, f"<b>Service: {title}</b>\n━━━━━━━━━━━━━━━━━━━━\n{BUSY_TXT}",
-                              busy_kb(f"s4r:{sid}", "s4_user_root"))
+                              busy_kb(f"s4r:{sid}", "buy"))
         if not rows:
             rows_kb = []
             if query:
                 rows_kb.append([btn("🔎 Search Again", f"s4cq:{sid}", style="success")])
-            rows_kb.append([btn("⬅️ Back", f"s4s:{sid}:0" if query else "s4_user_root", style="danger")])
+            rows_kb.append([btn("⬅️ Back", f"s4s:{sid}:0" if query else "buy", style="danger")])
             msg = ("❌ No matching country in stock." if query
                    else "📭 <b>Out of stock</b> — no numbers for this service right now.")
             return await edit(target, f"<b>Service: {title}</b>\n━━━━━━━━━━━━━━━━━━━━\n{msg}",
@@ -1473,7 +1500,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         text = (f"📦 <b>Service: {title}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
                 f"Select a country to view available virtual numbers &amp; live rates:\n"
                 f"<i>{len(rows)} countries in stock</i>")
-        if norm(svc["name"]) == "telegram":
+        if norm(svc_title) == "telegram":
             text = TELEGRAM_SERVICE_NOTE + "\n\n" + text
         pfx = "s4a" if full else "s4s"
         kb = InlineKeyboardBuilder()
@@ -1498,7 +1525,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         kb.row(btn("🔎 Search Country", f"s4cq:{sid}", style="success"), btn("🔄 Refresh", f"s4r:{sid}"))
         if not full and not query:
             kb.row(btn("🌍 All Countries", f"s4a:{sid}:0"))
-        kb.row(btn("⬅️ Back", "s4_user_root", style="danger"))
+        kb.row(btn("⬅️ Back", f"s4s:{sid}:0" if query else "buy", style="danger"))
         await edit(target, text, kb.as_markup())
 
     @scb(F.data.startswith("s4s:"))
@@ -1570,7 +1597,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         if not ops:
             return await render_countries(target, sid, 0)
         text = (f"📶 <b>Select Operator</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"• <b>Service:</b> {escape(svc['name'])}\n"
+                f"• <b>Service:</b> {escape(entry_name(svc, sid))}\n"
                 f"• <b>Country:</b> {flag_for(cname)} {escape(cname)}\n"
                 "<blockquote>Prices &amp; stock are live. 🔥 = best price. If an operator runs out, you will be told and brought back here.</blockquote>")
         if note:
@@ -1645,25 +1672,25 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             return await render_root(call)
         price = price_for(sid, cname, op, live["cost"])
         bal = float((u or {}).get("balance", 0.0))
-        enough = bal >= price
+        enough = bal >= price - 1e-6
         text = (
             "🛒 <b>Virtual Number Activation</b>\n━━━━━━━━━━━━━━━━━━━━\n"
             "<blockquote>"
-            f"• <b>Service:</b> {escape(cat[sid]['name'])}\n"
+            f"• <b>Service:</b> {escape(entry_name(cat[sid], sid))}\n"
             f"• <b>Country:</b> {flag_for(cname)} {escape(cname)}\n"
             f"• <b>Operator:</b> Operator {op}\n"
             f"• <b>Available:</b> {live['count']} numbers\n"
             f"• <b>Price:</b> {_fmt(price)}"
             "</blockquote>\n"
             f"💳 <b>Your balance:</b> {_fmt(bal)}"
-            + (f"  →  after: {_fmt(bal - price)}\n" if enough else f"  ❌ short by {_fmt(price - bal)}\n") +
+            + (f"  →  after: {_fmt(max(0.0, bal - price))}\n" if enough else f"  ❌ short by {_fmt(price - bal)}\n") +
             "\n⚠️ <b>Rules</b>\n"
             f"• Number is reserved for {OTP_TIMEOUT // 60} minutes to receive your OTP\n"
             "• 100% auto refund if no SMS arrives\n"
             "• Non-refundable once the verification code has arrived\n"
             f"• Cancel unlocks after {CANCEL_LOCK // 60} minutes without OTP"
         )
-        buy_row = ([btn(f"✅ Purchase — {short(price)}", f"s4b:{sid}:{cid}:{op}:{int(price)}", style="success")] if enough
+        buy_row = ([btn(f"✅ Purchase — {short(price)}", f"s4b:{sid}:{cid}:{op}:{price:.2f}", style="success")] if enough
                    else [btn("💰 Recharge", "recharge", style="success")])
         kb = InlineKeyboardMarkup(inline_keyboard=[
             buy_row,
@@ -1679,7 +1706,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         if is_spamming(call.from_user.id):
             return await call.answer("⏳ Please wait a few seconds…", show_alert=False)
         _, sid, cid, op, shown = call.data.split(":")
-        shown = int(shown)
+        shown = float(shown)
         uid = call.from_user.id
 
         # FINAL PRICE/STOCK GUARD: force a fresh TemporaSMS check only here.
@@ -1692,10 +1719,10 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         cat = await client.services()
         if sid not in cat:
             return await render_root(call)
-        svc_name = cat[sid]["name"]
+        svc_name = entry_name(cat[sid], sid)
         cname = (await client.countries()).get(cid, f"Country {cid}")
         price = price_for(sid, cname, op, live["cost"])
-        if price > shown:
+        if price > shown + 0.005:
             await call.answer(f"Price changed to {short(price)}. Please confirm again.", show_alert=True)
             return await render_confirm(call, sid, cid, op)
 
@@ -1718,8 +1745,10 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
                 await edit(call, "⏳ <i>Assigning your number…</i>")
             except Exception as e:      # a UI hiccup must never cost the user money
                 print(f"[server4] pre-buy UI edit failed: {e!r}")
-            max_price = round(live["cost"] * 1.10 + 0.01, 2)
-            status, a, b = await client.get_number(live["code"], cid, op, max_price)
+            max_price = round(live["cost"] * 1.10 + 0.01, 4)
+            status, a, b = await client.get_number(
+                live["code"], cid, op, max_price, provider_ids=live.get("provider_ids")
+            )
             reply = a
             if status == "ok":
                 act = a
@@ -1850,7 +1879,7 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             "server": "Server 4", "status": "purchased", "date": datetime.utcnow(),
         })
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [btn("📋 Copy OTP", copy_text=CopyTextButton(text=str(otp)))],
+            [btn("📋 Copy OTP", copy_text=CopyTextButton(text=str(otp)[:256]))],
             [btn("🔄 Buy Again", f"s4o:{task['sid']}:{task['country_id']}:{task['operator']}"),
              btn("⬅️ Menu", "s4_user_root")],
         ])
@@ -1980,17 +2009,17 @@ def register_server4_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             spawn(otp_worker(t))
 
     async def rates_loop():
-        """Keeps the popular services' live rates fresh on the RATES key, so user clicks are instant
-        and never wait on (or compete with) the purchase key."""
+        """Keeps Telegram live rates fresh on the RATES key, so Server 4 clicks are instant."""
         await asyncio.sleep(1)
         while True:
             try:
                 cat = await client.services()
                 await client.countries()
-                for _label, sid in popular_cached(cat)[:WARM_TOP]:
+                tg_sid = primary_service_sid(cat, "Telegram")
+                warm_sids = [tg_sid] if tg_sid else []
+                for sid in warm_sids:
                     try:
                         rows, names = await cached_service_offers(sid, full=False, force=True)
-                        # Keep the full-country snapshot in sync with the same provider refresh.
                         _s4_offer_cache[(sid, False)] = {"t": time.time(), "rows": rows, "names": names}
                     except ProviderUnavailable:
                         pass
@@ -2038,5 +2067,5 @@ async def send_s4_operator_menu_direct(target_msg: Message, service: str, countr
     kb = InlineKeyboardMarkup(inline_keyboard=[[btn("📶 Choose operator", f"s4c:{sid}:{cid}", style="success")],
                                                [btn("⬅️ Server 4 Menu", "s4_user_root")]])
     await target_msg.answer(
-        f"📦 <b>{escape(cat[sid]['name'])}</b> · {flag_for(names[cid])} {escape(names[cid])}\nTap below to see live operators &amp; prices.",
+        f"📦 <b>{escape(entry_name(cat[sid], sid))}</b> · {flag_for(names[cid])} {escape(names[cid])}\nTap below to see live operators &amp; prices.",
         reply_markup=kb)
