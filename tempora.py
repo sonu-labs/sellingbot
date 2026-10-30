@@ -245,6 +245,23 @@ class TemporaClient(_BaseClient):
         raw = await self.call(action="setStatus", status=6, id=activation_id)
         return raw
 
+    async def close(self, *args, **kwargs):
+        # aiogram shutdown hook - friend's allapps.py expects this
+        # base otp client has no session, so just no-op / try to close aiohttp if exists
+        try:
+            sess = getattr(self, "_session", None) or getattr(self, "session", None)
+            if sess is not None:
+                # could be aiohttp ClientSession
+                try:
+                    if hasattr(sess, "close"):
+                        res = sess.close()
+                        if hasattr(res, "__await__"):
+                            await res
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     # For live purchase path
     async def call(self, **kwargs):
         # Map to base class call with action

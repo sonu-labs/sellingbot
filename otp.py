@@ -166,6 +166,10 @@ class TemporaClient:
     def key(self, value):
         self._key_source = value
 
+    async def close(self, *args, **kwargs):
+        # shutdown hook safe
+        return None
+
     def clear_cache(self):
         """Drop every cached catalog and route probe (memory + MongoDB)."""
         self.cache.clear()
