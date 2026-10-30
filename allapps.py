@@ -19,11 +19,17 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+try:
+    from config import ADMIN_LOG_ID, SALES_LOG_ID, USD_TO_INR
+except Exception:
+    SALES_LOG_ID = os.getenv("SALES_LOG_ID", "-1002254383562")
+    ADMIN_LOG_ID = os.getenv("ADMIN_LOG_ID", "-1003441797589")
+    USD_TO_INR = float(os.getenv("USD_TO_INR", "100"))
 import provider
 import i18n as _i18n
 from tempora import (
     TemporaClient, ProviderUnavailable, retail_price, cost_inr, search_services, popular_services,
-    sid_of, norm, PRIORITY_COUNTRIES, LEGACY_NAMES,
+    sid_of, norm, entry_name, PRIORITY_COUNTRIES, LEGACY_NAMES,
 )
 
 # ---------------- tunables ----------------
@@ -38,13 +44,32 @@ WARM_EVERY = int(os.getenv("S3_WARM_EVERY", "300"))   # seconds between backgrou
 WARM_TOP = int(os.getenv("S3_WARM_TOP", "3"))        # how many popular services are kept warm
 
 import logfmt as _lf
-SALES_CHANNEL = "-1001518758186"
-ADMIN_LOG_CHANNEL = "-1003208353049"
+SALES_CHANNEL = SALES_LOG_ID
+ADMIN_LOG_CHANNEL = ADMIN_LOG_ID
 
-API_KEY = os.getenv("TEMPORASMS_API_KEY") or provider.API_KEY
-RATES_KEY = os.getenv("TEMPORASMS_RATES_API_KEY") or getattr(provider, "RATES_API_KEY", None) or API_KEY
+_db_api_key_getter = None
+
+
+def _resolve_purchase_key() -> str:
+    if callable(_db_api_key_getter):
+        try:
+            k = (_db_api_key_getter() or "").strip()
+            if k:
+                return k
+        except Exception:
+            pass
+    return (os.getenv("TEMPORASMS_API_KEY") or provider.API_KEY or "").strip()
+
+
+def _resolve_rates_key() -> str:
+    rk = (os.getenv("TEMPORASMS_RATES_API_KEY") or getattr(provider, "RATES_API_KEY", None) or "").strip()
+    return rk or _resolve_purchase_key()
+
+
+API_KEY = _resolve_purchase_key()
+RATES_KEY = _resolve_rates_key()
 # purchase lane = API_KEY, live-rates lane = RATES_KEY (separate pools, separate concurrency limits)
-client = TemporaClient(API_KEY, provider.BASE_URL, rates_key=RATES_KEY)
+client = TemporaClient(_resolve_purchase_key, provider.BASE_URL, rates_key=_resolve_rates_key)
 
 # ---------------------------------------------------------------------
 # Server 3 TemporaSMS rate cache
@@ -183,7 +208,7 @@ DEFAULT_CFG = {
     "wa_markup_pct": 100.0,
     "other_markup_pct": 100.0,
     "min_profit": 10.0,
-    "unit_to_inr": 1.0,
+    "unit_to_inr": USD_TO_INR,
     "legacy_prices": False,
     "category_pricing": True,
 }
@@ -296,6 +321,7 @@ CUSTOM_FLAG_EMOJI_IDS = {
     "HR": "5291999676948569127",
     "HT": "5292045130587462814",
     "HU": "5294229581018975260",
+    "ID": "5294378161117614233",
     "IE": "5294471971793293647",
     "IL": "5294069056616289553",
     "IM": "5294318478252070646",
@@ -576,11 +602,11 @@ def flag_for(name: str) -> str:
             except Exception:
                 pass
         try:
-            # Server 3 can be imported either as Bot.server3 or as a top-level module.
+            # Load comprehensive country flag map from server3.py
             try:
-                from .server4 import LZT_COUNTRY_MAP, flag_emoji
+                from .server3 import LZT_COUNTRY_MAP, flag_emoji
             except (ImportError, ValueError):
-                from server4 import LZT_COUNTRY_MAP, flag_emoji
+                from server3 import LZT_COUNTRY_MAP, flag_emoji
             for _code, (a2, n) in LZT_COUNTRY_MAP.items():
                 nn = norm(n)
                 _flag_cache.setdefault(nn, flag_emoji(a2))
@@ -633,7 +659,7 @@ def premium_button_parts(text, **kwargs):
 
 async def edit(target, text, kb=None):
     """Edit in place; ignore 'message is not modified'."""
-    m = target.message if isinstance(target, CallbackQuery) else target
+    m = target.message if isinstance(target, CallbackQuery) or (hasattr(target, "message") and not hasattr(target, "edit_text")) else target
     try:
         await m.edit_text(premiumize_text(text), reply_markup=kb, parse_mode="HTML")
     except TelegramBadRequest as e:
@@ -663,8 +689,27 @@ def short(n: float) -> str:
 # =====================================================================
 def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_col, is_admin_func, fmt_curr_func):
     s3_settings = db["server3_settings"]
+    otp_settings_col = db["settings"]
     tasks_col = db["server3_tasks"]
     _bg = set()
+
+    _key_cache = {"t": 0.0, "k": ""}
+
+    def _read_db_tempora_key() -> str:
+        now = time.time()
+        if now - _key_cache["t"] < 5.0:
+            return _key_cache["k"]
+        try:
+            doc = otp_settings_col.find_one({"_id": "otp_services"}) or {}
+            k = str(doc.get("tempora_api_key") or "").strip()
+        except Exception:
+            k = ""
+        _key_cache["t"] = now
+        _key_cache["k"] = k
+        return k
+
+    global _db_api_key_getter
+    _db_api_key_getter = _read_db_tempora_key
 
     def spawn(coro):
         """create_task that cannot be garbage-collected mid-flight (paid OTP workers must never vanish)."""
@@ -810,7 +855,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             [btn("🔄 Refresh Catalog", "s3_adm_refresh")],
             [btn(f"{status} — Click to {'Disable' if active else 'Enable'}", "s3_adm_toggle_maint")],
             [btn("🧪 Probe API", "s3_adm_probe")],
-            [btn("❌ Close", "admin_back")],
+            [btn("⬅️ Back to Admin", "admin_refresh")],
         ])
 
     def admin_text():
@@ -1092,11 +1137,12 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             ("getServiceList op=1", dict(action="getServiceList", operator="1")),
         ]
         t0 = time.time()
-        raws = await asyncio.gather(*[client.call(**p) for _, p in checks])
+        raws = await asyncio.gather(*[client.call(**p) for _, p in checks], return_exceptions=True)
         await call.message.answer(premiumize_text(f"🧪 Probe finished in {time.time() - t0:.1f}s"), parse_mode="HTML")
         for (label, _), raw in zip(checks, raws):
+            display = f"EXCEPTION: {raw!r}" if isinstance(raw, Exception) else str(raw or "NO RESPONSE")[:700]
             await call.message.answer(
-                premiumize_text(f"<b>{escape(label)}</b>\n<pre>{escape((raw or 'NO RESPONSE')[:700])}</pre>"),
+                premiumize_text(f"<b>{escape(label)}</b>\n<pre>{escape(display)}</pre>"),
                 parse_mode="HTML"
             )
 
@@ -1138,12 +1184,8 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
     # =================================================================
     #                       USER: SCREENS
     # =================================================================
-    _pop = {"id": None, "v": None}
-
     def popular_cached(cat):
-        if _pop["id"] != id(cat):
-            _pop.update(id=id(cat), v=popular_services(cat))
-        return _pop["v"]
+        return popular_services(cat)
 
     def busy_kb(retry_cb, back_cb):
         return InlineKeyboardMarkup(inline_keyboard=[[btn("🔄 Try again", retry_cb, style="success")],
@@ -1157,13 +1199,16 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         # provider entry with only one country when the real "WhatsApp"
         # service is available in the catalog.
         for sid, entry in cat.items():
-            if norm(entry.get("name", "")) == target:
+            if norm(entry_name(entry)) == target:
                 return sid
-        matches = [(sid, e) for sid, e in cat.items() if target in norm(e.get("name", ""))]
+        matches = [(sid, e) for sid, e in cat.items() if target in norm(entry_name(e))]
         return matches[0][0] if matches else None
 
     async def render_root(target):
-        cat = await client.services()
+        try:
+            cat = await client.services()
+        except ProviderUnavailable:
+            return await edit(target, BUSY_TXT, busy_kb("s3_user_root", "buy"))
         pop = popular_cached(cat)
 
         # Always pin the main Telegram + WhatsApp services, then fill the
@@ -1175,28 +1220,31 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             if sid and sid not in seen:
                 pinned.append((label, sid))
                 seen.add(sid)
-        for label, sid in pop:
+        for item in pop:
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                continue
+            label, sid = item
             # Keep the dedicated/main WhatsApp button on the home screen,
             # but do not show the separate WhatsApp Business service there.
             # Users can still find it through Search All Services if it exists
             # in the provider catalog.
-            entry = cat.get(sid, {}) or {}
-            service_name = norm(entry.get("name", "") or label)
+            entry = cat.get(sid)
+            service_name = norm(entry_name(entry) or str(label))
             if service_name in {"whatsapp business", "wa business", "whatsappbusiness"}:
                 continue
-            if sid not in seen:
-                pinned.append((label, sid))
+            if sid in cat and sid not in seen:
+                pinned.append((str(label), sid))
                 seen.add(sid)
             if len(pinned) >= 9:
                 break
         pinned = pinned[:9]
 
         text = (
-            "❤️‍🔥 <b>VTH PANEL</b>"
-            "<b> SMS &amp; Virtual Number Activation</b>\n"
+            "❤️‍🔥 <b>TGA Store</b>"
+            "<b> — SMS &amp; Virtual Number Activation</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "<blockquote>⚡ <b>{n}+</b> apps &amp; platforms .\n"
-            "🌍 Numbers from many countries, live stock &amp; prices .\n"
+            "<blockquote>⚡ <b>{n}+</b> apps &amp; platforms.\n"
+            "🌍 Numbers from many countries, live stock &amp; prices.\n"
             "💯 <b>Auto refund</b> if no SMS arrives.\n"
             "🚀 OTP delivered straight into this chat.</blockquote>\n"
             "⭐ <b>Popular Services:</b>"
@@ -1363,7 +1411,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
     # ---- browse all ----
     async def render_browse(target, page):
         cat = await client.services()
-        items = sorted(cat.items(), key=lambda kv: kv[1]["name"].lower())
+        items = sorted(cat.items(), key=lambda kv: entry_name(kv[1], kv[0]).lower())
         pages = max(1, (len(items) + SERVICES_PER_PAGE - 1) // SERVICES_PER_PAGE)
         page = max(0, min(page, pages - 1))
         chunk = items[page * SERVICES_PER_PAGE:(page + 1) * SERVICES_PER_PAGE]
@@ -1371,7 +1419,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
                 f"<i>Page {page + 1} of {pages}</i>\nTap any service to see countries &amp; live pricing:")
         kb = InlineKeyboardBuilder()
         for sid, e in chunk:
-            kb.button(text=e["name"][:28], callback_data=f"s3s:{sid}:0")
+            kb.button(text=entry_name(e, sid)[:28], callback_data=f"s3s:{sid}:0")
         kb.adjust(2)
         nav = []
         if page > 0:
@@ -1420,7 +1468,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             text = f"🔎 <b>Results for “{escape(q[:40])}”</b> — {len(results)} found\nTap a service:"
             b = InlineKeyboardBuilder()
             for sid, e in results[:20]:
-                b.button(text=e["name"][:28], callback_data=f"s3s:{sid}:0")
+                b.button(text=entry_name(e, sid)[:28], callback_data=f"s3s:{sid}:0")
             b.adjust(2)
             b.row(btn("🔎 Search Again", "s3q", style="success"), btn("⬅️ Back", "s3_user_root", style="danger"))
             kb = b.as_markup()
@@ -1444,7 +1492,8 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         svc = cat.get(sid)
         if not svc:
             return await render_root(target)
-        title = escape(svc["name"])
+        svc_title = entry_name(svc, sid)
+        title = escape(svc_title)
         # fast=True (WhatsApp / direct opens): never make the user wait for the ~200-country scan.
         # Show the priority countries instantly and warm the full list in the background.
         if full and fast and not _cache_fresh(_s3_offer_cache.get((sid, True)), RATE_CACHE_TTL) \
@@ -1477,7 +1526,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         text = (f"📦 <b>Service: {title}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
                 f"Select a country to view available virtual numbers &amp; live rates:\n"
                 f"<i>{len(rows)} countries in stock</i>")
-        if norm(svc["name"]) == "telegram":
+        if norm(svc_title) == "telegram":
             text = TELEGRAM_SERVICE_NOTE + "\n\n" + text
         pfx = "s3a" if full else "s3s"
         kb = InlineKeyboardBuilder()
@@ -1574,7 +1623,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         if not ops:
             return await render_countries(target, sid, 0)
         text = (f"📶 <b>Select Operator</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"• <b>Service:</b> {escape(svc['name'])}\n"
+                f"• <b>Service:</b> {escape(entry_name(svc, sid))}\n"
                 f"• <b>Country:</b> {flag_for(cname)} {escape(cname)}\n"
                 "<blockquote>Prices &amp; stock are live. 🔥 = best price. If an operator runs out, you will be told and brought back here.</blockquote>")
         if note:
@@ -1649,25 +1698,25 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             return await render_root(call)
         price = price_for(sid, cname, op, live["cost"])
         bal = float((u or {}).get("balance", 0.0))
-        enough = bal >= price
+        enough = bal >= price - 1e-6
         text = (
             "🛒 <b>Virtual Number Activation</b>\n━━━━━━━━━━━━━━━━━━━━\n"
             "<blockquote>"
-            f"• <b>Service:</b> {escape(cat[sid]['name'])}\n"
+            f"• <b>Service:</b> {escape(entry_name(cat[sid], sid))}\n"
             f"• <b>Country:</b> {flag_for(cname)} {escape(cname)}\n"
             f"• <b>Operator:</b> Operator {op}\n"
             f"• <b>Available:</b> {live['count']} numbers\n"
             f"• <b>Price:</b> {_fmt(price)}"
             "</blockquote>\n"
             f"💳 <b>Your balance:</b> {_fmt(bal)}"
-            + (f"  →  after: {_fmt(bal - price)}\n" if enough else f"  ❌ short by {_fmt(price - bal)}\n") +
+            + (f"  →  after: {_fmt(max(0.0, bal - price))}\n" if enough else f"  ❌ short by {_fmt(price - bal)}\n") +
             "\n⚠️ <b>Rules</b>\n"
             f"• Number is reserved for {OTP_TIMEOUT // 60} minutes to receive your OTP\n"
             "• 100% auto refund if no SMS arrives\n"
             "• Non-refundable once the verification code has arrived\n"
             f"• Cancel unlocks after {CANCEL_LOCK // 60} minutes without OTP"
         )
-        buy_row = ([btn(f"✅ Purchase — {short(price)}", f"s3b:{sid}:{cid}:{op}:{int(price)}", style="success")] if enough
+        buy_row = ([btn(f"✅ Purchase — {short(price)}", f"s3b:{sid}:{cid}:{op}:{price:.2f}", style="success")] if enough
                    else [btn("💰 Recharge", "recharge", style="success")])
         kb = InlineKeyboardMarkup(inline_keyboard=[
             buy_row,
@@ -1683,7 +1732,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         if is_spamming(call.from_user.id):
             return await call.answer("⏳ Please wait a few seconds…", show_alert=False)
         _, sid, cid, op, shown = call.data.split(":")
-        shown = int(shown)
+        shown = float(shown)
         uid = call.from_user.id
 
         # FINAL PRICE/STOCK GUARD: force a fresh TemporaSMS check only here.
@@ -1696,10 +1745,10 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         cat = await client.services()
         if sid not in cat:
             return await render_root(call)
-        svc_name = cat[sid]["name"]
+        svc_name = entry_name(cat[sid], sid)
         cname = (await client.countries()).get(cid, f"Country {cid}")
         price = price_for(sid, cname, op, live["cost"])
-        if price > shown:
+        if price > shown + 0.005:
             await call.answer(f"Price changed to {short(price)}. Please confirm again.", show_alert=True)
             return await render_confirm(call, sid, cid, op)
 
@@ -1722,8 +1771,10 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
                 await edit(call, "⏳ <i>Assigning your number…</i>")
             except Exception as e:      # a UI hiccup must never cost the user money
                 print(f"[server3] pre-buy UI edit failed: {e!r}")
-            max_price = round(live["cost"] * 1.10 + 0.01, 2)
-            status, a, b = await client.get_number(live["code"], cid, op, max_price)
+            max_price = round(live["cost"] * 1.10 + 0.01, 4)
+            status, a, b = await client.get_number(
+                live["code"], cid, op, max_price, provider_ids=live.get("provider_ids")
+            )
             reply = a
             if status == "ok":
                 act = a
@@ -1854,7 +1905,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             "server": "Server 3", "status": "purchased", "date": datetime.utcnow(),
         })
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [btn("📋 Copy OTP", copy_text=CopyTextButton(text=str(otp)))],
+            [btn("📋 Copy OTP", copy_text=CopyTextButton(text=str(otp)[:256]))],
             [btn("🔄 Buy Again", f"s3o:{task['sid']}:{task['country_id']}:{task['operator']}"),
              btn("⬅️ Menu", "s3_user_root")],
         ])
@@ -2042,5 +2093,5 @@ async def send_s3_operator_menu_direct(target_msg: Message, service: str, countr
     kb = InlineKeyboardMarkup(inline_keyboard=[[btn("📶 Choose operator", f"s3c:{sid}:{cid}", style="success")],
                                                [btn("⬅️ Server 3 Menu", "s3_user_root")]])
     await target_msg.answer(
-        f"📦 <b>{escape(cat[sid]['name'])}</b> · {flag_for(names[cid])} {escape(names[cid])}\nTap below to see live operators &amp; prices.",
+        f"📦 <b>{escape(entry_name(cat[sid], sid))}</b> · {flag_for(names[cid])} {escape(names[cid])}\nTap below to see live operators &amp; prices.",
         reply_markup=kb)

@@ -38,8 +38,20 @@ from admin_analytics import summarize_analytics, utc_naive
 from recharge_flow import register_recharge_handlers
 from smm import register_smm_handlers
 from server3 import register_server3_handlers
-from allapps import register_server3_handlers as register_allapps_handlers
-from server4 import register_server4_handlers
+from allapps import (
+    register_server3_handlers as register_allapps_handlers,
+    send_s3_operator_menu_direct,
+    client as _allapps_client,
+    clear_s3_rate_cache as _clear_allapps_rate_cache,
+)
+from server4 import (
+    register_server4_handlers,
+    send_s4_operator_menu_direct,
+    client as _server4_client,
+    clear_s4_rate_cache as _clear_server4_rate_cache,
+)
+from otp import register_otp_handlers
+from otp_admin import register_otp_admin_handlers
 from mustjoin import (
     check_join,
     get_force_sub_channels,
@@ -51,7 +63,7 @@ from mustjoin import (
 from config import (
     BOT_TOKEN, ADMIN_IDS, MONGO_URI, BOT_USERNAME, SUPPORT_USERNAME,
     UPDATES_CHANNEL, SALES_LOG_CHANNEL, ADMIN_LOG_ID, SALES_LOG_ID,
-    TEMPORASMS_API_KEY, TGLION_API_KEY, TGLION_ID, TGPVA_API_KEY,
+    TEMPORASMS_API_KEY, TEMPORASMS_MARKUP_PCT, TGLION_API_KEY, TGLION_ID, TGPVA_API_KEY,
     USD_TO_INR,
 )
 from rich_messages import (
@@ -939,6 +951,18 @@ async def cmd_start(m: Message):
             return
         await smm_send_menu(m.chat.id)
         return
+    if payload and payload.startswith("buy_s3_"):
+        rest = payload[len("buy_s3_"):]
+        if "_" in rest:
+            sid, cid = rest.rsplit("_", 1)
+            await send_s3_operator_menu_direct(m, sid, cid)
+            return
+    if payload and payload.startswith("buy_s4_"):
+        rest = payload[len("buy_s4_"):]
+        if "_" in rest:
+            sid, cid = rest.rsplit("_", 1)
+            await send_s4_operator_menu_direct(m, sid, cid)
+            return
 
     # Reward the referrer only now that the new user has confirmed channel membership
     await reward_referral_if_eligible(
@@ -4808,6 +4832,10 @@ async def send_server_dashboard(chat_id, message_id=None):
         InlineKeyboardButton(text="🛰️ Manage Server 3 & LZT", callback_data="s3m_home"),
     )
     kb.row(
+        InlineKeyboardButton(text="📲 All-Apps OTP Panel", callback_data="s3_adm_home"),
+        InlineKeyboardButton(text="✈️ Server 4 Panel", callback_data="s4_adm_home"),
+    )
+    kb.row(
         InlineKeyboardButton(text="🔄 Refresh Balances", callback_data="refresh_dashboard"),
         InlineKeyboardButton(text="⬅️ Admin Panel", callback_data="admin_refresh"),
     )
@@ -4834,6 +4862,11 @@ async def manage_toggles(cq: CallbackQuery):
         settings["s3"] = "maintenance" if settings.get("s3", "maintenance") == "active" else "active"
     elif action == "toggle_s4":
         settings["s4"] = "maintenance" if settings.get("s4", "active") == "active" else "active"
+        db["server4_settings"].update_one(
+            {"_id": "maintenance_config"},
+            {"$set": {"enabled": settings["s4"] != "active"}},
+            upsert=True,
+        )
     elif action == "switch_s2_api":
         settings["s2_api"] = "tglion" if settings.get("s2_api", "tgpva") == "tgpva" else "tgpva"
     
@@ -5431,7 +5464,7 @@ async def cmd_admin(msg: Message):
     await render_admin_panel(msg)
 
 
-@dp.callback_query(F.data == "admin_refresh")
+@dp.callback_query(F.data.in_(["admin_refresh", "admin_back"]))
 async def admin_refresh(cq: CallbackQuery, state: FSMContext):
     if not is_admin(cq.from_user.id):
         return await cq.answer("Access denied", show_alert=True)
@@ -6742,15 +6775,62 @@ server4_root = register_server4_handlers(
     dp=dp, bot=bot, db=db, users_col=users_col, orders_col=orders_col,
     is_admin_func=_s4_is_admin, fmt_curr_func=_s4_fmt_curr
 )
-# Old OTP handlers removed — allapps.py now serves All Apps OTP
-otp_background_task = None
+# --- OTP Admin Panel + Legacy OTP Order Reconciliation ---
 otp_ctx = {}
+otp_background_task = register_otp_handlers(
+    dp=dp, bot=bot, db=db, users_col=users_col,
+    api_key=TEMPORASMS_API_KEY, rate=USD_TO_INR, markup=TEMPORASMS_MARKUP_PCT,
+    settings_col=settings_col, registry=otp_ctx,
+)
+_orig_otp_clear_cache = otp_ctx["api"].clear_cache
+
+
+def _synced_otp_clear_cache():
+    _orig_otp_clear_cache()
+    _allapps_client.clear_cache()
+    _clear_allapps_rate_cache()
+    _server4_client.clear_cache()
+    _clear_server4_rate_cache()
+
+
+otp_ctx["api"].clear_cache = _synced_otp_clear_cache
+
+register_otp_admin_handlers(
+    dp=dp, bot=bot, db=db, users_col=users_col, settings_col=settings_col,
+    admin_ids=ADMIN_IDS, env_api_key=TEMPORASMS_API_KEY, env_markup=TEMPORASMS_MARKUP_PCT,
+    rate=USD_TO_INR, otp_ctx=otp_ctx, admin_log_id=ADMINLOG,
+)
+
+
+async def _start_health_server():
+    """Bind 0.0.0.0:$PORT when running as a Render Web Service so port checks succeed."""
+    port_raw = (os.getenv("PORT") or "").strip()
+    if not port_raw.isdigit():
+        return None
+    from aiohttp import web
+
+    async def _health(_request):
+        return web.json_response({"ok": True, "service": "tga-store-bot"})
+
+    app = web.Application()
+    app.router.add_get("/", _health)
+    app.router.add_get("/health", _health)
+    app.router.add_get("/healthz", _health)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(port_raw))
+    await site.start()
+    print(f"Health server listening on 0.0.0.0:{port_raw}", flush=True)
+    return runner
+
+
 # ===== Bot Runner =====
 async def main():
     global BOT_STARTED_AT, SMM_BACKGROUND_TASK
     from aiogram.types import BotCommand, BotCommandScopeChat
 
     BOT_STARTED_AT = datetime.now(timezone.utc)
+    health_runner = await _start_health_server()
     print("TGA Store | API started.")
     await bot.set_my_commands([
         BotCommand(command="start", description="Open TGA Store | API"),
@@ -6763,6 +6843,8 @@ async def main():
                 BotCommand(command="start", description="Open user menu"),
                 BotCommand(command="balance", description="View wallet balance"),
                 BotCommand(command="manageserver", description="Manage API servers"),
+                BotCommand(command="server3", description="Manage All-Apps OTP panel"),
+                BotCommand(command="server4", description="Manage Server 4 (New Numbers)"),
                 BotCommand(command="paymentsettings", description="Manage payments"),
                 BotCommand(command="otpadmin", description="Manage OTP services (TemporaSMS)"),
                 BotCommand(command="smmadmin", description="Manage SMM services"),
@@ -6783,6 +6865,8 @@ async def main():
         if otp_task:
             otp_task.cancel()
             await asyncio.gather(otp_task, return_exceptions=True)
+        if health_runner:
+            await health_runner.cleanup()
 
 if __name__ == "__main__":
     import traceback
