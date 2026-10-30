@@ -28,6 +28,13 @@ DATABASE_URL = _getenv("DATABASE_URL", "sqlite:///data.db")
 API_ID = int(_getenv("API_ID", "0") or 0)
 API_HASH = _getenv("API_HASH")
 TEMPORASMS_API_KEY = _getenv("TEMPORASMS_API_KEY")
+try:
+    OTP_MARKUP_PERCENT = float(
+        _getenv("OTP_MARKUP_PERCENT") or _getenv("TEMPORASMS_MARKUP_PCT") or "0"
+    )
+except ValueError:
+    OTP_MARKUP_PERCENT = 0.0
+TEMPORASMS_MARKUP_PCT = OTP_MARKUP_PERCENT
 
 # Server 2 providers. These used to be hard-coded API keys in bot.py;
 # credentials must only ever come from the environment (see example.env).

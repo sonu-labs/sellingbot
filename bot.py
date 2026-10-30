@@ -63,7 +63,7 @@ from mustjoin import (
 from config import (
     BOT_TOKEN, ADMIN_IDS, MONGO_URI, BOT_USERNAME, SUPPORT_USERNAME,
     UPDATES_CHANNEL, SALES_LOG_CHANNEL, ADMIN_LOG_ID, SALES_LOG_ID,
-    TEMPORASMS_API_KEY, TEMPORASMS_MARKUP_PCT, TGLION_API_KEY, TGLION_ID, TGPVA_API_KEY,
+    TEMPORASMS_API_KEY, OTP_MARKUP_PERCENT, TGLION_API_KEY, TGLION_ID, TGPVA_API_KEY,
     USD_TO_INR,
 )
 from rich_messages import (
@@ -6779,7 +6779,7 @@ server4_root = register_server4_handlers(
 otp_ctx = {}
 otp_background_task = register_otp_handlers(
     dp=dp, bot=bot, db=db, users_col=users_col,
-    api_key=TEMPORASMS_API_KEY, rate=USD_TO_INR, markup=TEMPORASMS_MARKUP_PCT,
+    api_key=TEMPORASMS_API_KEY, rate=USD_TO_INR, markup=OTP_MARKUP_PERCENT,
     settings_col=settings_col, registry=otp_ctx,
 )
 _orig_otp_clear_cache = otp_ctx["api"].clear_cache
@@ -6797,7 +6797,7 @@ otp_ctx["api"].clear_cache = _synced_otp_clear_cache
 
 register_otp_admin_handlers(
     dp=dp, bot=bot, db=db, users_col=users_col, settings_col=settings_col,
-    admin_ids=ADMIN_IDS, env_api_key=TEMPORASMS_API_KEY, env_markup=TEMPORASMS_MARKUP_PCT,
+    admin_ids=ADMIN_IDS, env_api_key=TEMPORASMS_API_KEY, env_markup=OTP_MARKUP_PERCENT,
     rate=USD_TO_INR, otp_ctx=otp_ctx, admin_log_id=ADMINLOG,
 )
 
