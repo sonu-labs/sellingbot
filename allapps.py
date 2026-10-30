@@ -1098,11 +1098,18 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             ("getServiceList op=1", dict(action="getServiceList", operator="1")),
         ]
         t0 = time.time()
-        raws = await asyncio.gather(*[client.call(**p) for _, p in checks])
+        raws = await asyncio.gather(*[client.call(**p) for _, p in checks], return_exceptions=True)
         await call.message.answer(premiumize_text(f"🧪 Probe finished in {time.time() - t0:.1f}s"), parse_mode="HTML")
         for (label, _), raw in zip(checks, raws):
+            if isinstance(raw, Exception):
+                display = f"ERROR: {type(raw).__name__}: {raw}"
+                # include code if ProviderError
+                if hasattr(raw, "code") and raw.code:
+                    display += f" (code={raw.code})"
+            else:
+                display = (raw or 'NO RESPONSE')[:700]
             await call.message.answer(
-                premiumize_text(f"<b>{escape(label)}</b>\n<pre>{escape((raw or 'NO RESPONSE')[:700])}</pre>"),
+                premiumize_text(f"<b>{escape(label)}</b>\n<pre>{escape(display)}</pre>"),
                 parse_mode="HTML"
             )
 
@@ -1169,7 +1176,19 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         return matches[0][0] if matches else None
 
     async def render_root(target):
-        cat = await client.services()
+        try:
+            cat = await client.services()
+        except Exception as e:
+            # Balance may work but catalog fails (bad key, provider busy)
+            # Show friendly error instead of crashing with [server3] ERROR
+            code = getattr(e, "code", None)
+            if code == "BAD_KEY":
+                msg = "❌ <b>Provider API key invalid</b>\nPlease check TEMPORASMS_API_KEY in env and refresh catalog."
+            elif code in ("BAD_OPERATOR", "BAD_SERVICE", "NO_OPERATORS"):
+                msg = "⚠️ <b>Provider catalog not available for this operator</b>\nTry /s3stats refresh or change operator."
+            else:
+                msg = f"⚠️ <b>Provider unavailable</b>\n<code>{escape(str(e)[:300])}</code>\nPlease try again in a moment. Balance check may still succeed."
+            return await edit(target, msg, busy_kb("s3_user_root", "back_main"))
         pop = popular_cached(cat)
 
         # Always pin the main Telegram + WhatsApp services, then fill the
@@ -1198,8 +1217,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         pinned = pinned[:9]
 
         text = (
-            "❤️‍🔥 <b>VTH PANEL</b>"
-            "<b> SMS &amp; Virtual Number Activation</b>\n"
+            "❤️‍🔥 <b>TGA Store Virtual Number Service</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "<blockquote>⚡ <b>{n}+</b> apps &amp; platforms .\n"
             "🌍 Numbers from many countries, live stock &amp; prices .\n"
@@ -1321,11 +1339,11 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         await call.answer()
 
         help_text = (
-            "ℹ️ <b>About Server 3/ vth panel Virtual Number Activation</b>\n"
+            "ℹ️ <b>About TGA Store Virtual Number Service</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
 
             "<b>What Services Are Provided?</b>\n"
-            "Server 3 / All apps acc connects directly to <b>VTH Panel</b> global carrier "
+            "TGA Store Virtual Number Service connects directly to global carrier "
             "telecom routes, providing fresh, private, disposable mobile "
             "numbers across <b>200+ countries</b> to receive SMS "
             "verification codes &amp; OTPs.\n\n"

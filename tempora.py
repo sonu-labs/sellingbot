@@ -141,17 +141,29 @@ class TemporaClient(_BaseClient):
 
     async def countries(self):
         # Return dict of country_id -> name, from catalog
-        try:
-            data = await self.call(action="getCountries", service="wa")
-            # Data may be dict of id->name or string
-            if isinstance(data, dict):
-                return {str(k): str(v) for k,v in data.items()}
-        except Exception:
-            pass
+        # Try with popular service 'wa' and operator variants
+        for op in ["1", "8", None]:
+            for svc in ["wa", "tg", None]:
+                try:
+                    kwargs = {}
+                    if svc is not None:
+                        kwargs["service"] = svc
+                    if op is not None:
+                        kwargs["operator"] = op
+                    data = await self.call(action="getCountries", **kwargs)
+                    if isinstance(data, dict) and data:
+                        return {str(k): str(v) for k,v in data.items()}
+                except Exception as e:
+                    code = getattr(e, "code", "")
+                    if code in ("BAD_OPERATOR", "BAD_SERVICE", "BAD_TYPE", "BAD_COUNTRY"):
+                        continue
+                    if code in ("BAD_KEY",):
+                        raise
+                    continue
         return {}
 
     async def country_offers(self, sid, cid):
-        # Per-country operators/prices
+        # Per-country operators/prices - try multiple actions/operators
         cache_key = f"co:{sid}:{cid}"
         if self.has_cached(cache_key):
             val = self.cache.get(cache_key)
@@ -159,23 +171,54 @@ class TemporaClient(_BaseClient):
                 return val
             if isinstance(val, list):
                 return val, {}
-        try:
-            res = await self.call(action="getPricesV2", service=sid, country=cid)
-        except Exception:
-            res = {}
-        rows = []
-        if isinstance(res, dict):
-            # Try price_options shape
-            for price, stock in res.items():
-                if price in ("providers","price","cost","count"):
-                    continue
+        for action in ("getPricesV3", "getPricesV2", "getPrices"):
+            for op in ["1", "8", None]:
                 try:
-                    cost = float(price)
-                    cnt = int(stock) if str(stock).isdigit() else 0
-                    rows.append({"country_id": cid, "operator": "1", "cost": cost, "count": cnt, "code": sid})
-                except Exception:
+                    kwargs = {"service": sid, "country": cid}
+                    if op is not None:
+                        kwargs["operator"] = op
+                    res = await self.call(action=action, **kwargs)
+                    rows = []
+                    if isinstance(res, dict):
+                        for price, stock in res.items():
+                            if price in ("providers","price","cost","count","providerIds"):
+                                continue
+                            if isinstance(stock, dict):
+                                continue
+                            try:
+                                cost = float(price)
+                                cnt = int(stock) if str(stock).isdigit() else 0
+                                rows.append({"country_id": cid, "operator": op or "1", "cost": cost, "count": cnt, "code": sid})
+                            except Exception:
+                                continue
+                        if "providers" in res and isinstance(res["providers"], dict):
+                            for prov, pdata in res["providers"].items():
+                                if isinstance(pdata, dict):
+                                    for price, stock in pdata.items():
+                                        try:
+                                            cost = float(price)
+                                            cnt = int(stock) if str(stock).isdigit() else 0
+                                            rows.append({"country_id": cid, "operator": prov, "cost": cost, "count": cnt, "code": sid})
+                                        except:
+                                            pass
+                            if rows:
+                                return rows, {}
+                        if rows:
+                            return rows, {}
+                    if isinstance(res, list) and res:
+                        for item in res:
+                            if isinstance(item, dict) and "cost" in item:
+                                rows.append({"country_id": cid, "operator": item.get("operator", op or "1"), "cost": float(item["cost"]), "count": int(item.get("count", 1)), "code": sid})
+                        if rows:
+                            return rows, {}
+                except Exception as e:
+                    code = getattr(e, "code", "")
+                    if code in ("BAD_OPERATOR", "BAD_SERVICE", "BAD_COUNTRY"):
+                        continue
+                    if code == "BAD_KEY":
+                        raise
                     continue
-        return rows, {}
+        return [], {}
 
     def has_cached(self, key, max_age=300):
         # Simple: check if key in cache (otp caches catalog)
@@ -199,12 +242,31 @@ class TemporaClient(_BaseClient):
         self.clear_cache()
 
     async def services(self):
-        try:
-            data = await self.call(action="getServices")
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
+        # TemporaSMS requires operator param for many catalog calls
+        # Try common operators first, then bare call
+        for op in ["1", "8", "2", "3", None]:
+            try:
+                if op is not None:
+                    data = await self.call(action="getServices", operator=op)
+                else:
+                    data = await self.call(action="getServices")
+                if isinstance(data, dict) and data:
+                    return data
+                if isinstance(data, dict):
+                    # empty but valid
+                    return data
+            except Exception as e:
+                code = getattr(e, "code", "")
+                # BAD_OPERATOR means this operator not supported for this action - try next
+                if code in ("BAD_OPERATOR", "BAD_SERVICE", "BAD_TYPE") and op is not None:
+                    continue
+                # re-raise for BAD_KEY etc so user sees proper error
+                if code in ("BAD_KEY", "USER_BANNED"):
+                    raise
+                # for other provider errors, try next operator before giving up
+                if op is not None:
+                    continue
+                raise
         return {}
 
     async def live_offer(self, sid, cid, op, max_age=15):
