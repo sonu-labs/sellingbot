@@ -633,5 +633,40 @@ class AllAppsAndServer4FlowTests(unittest.IsolatedAsyncioTestCase):
         await loyalty.arefund(1001, 10.0, "s3")
 
 
+class BotStartupImportTests(unittest.TestCase):
+    def test_bot_and_config_import_cleanly_from_fresh_process(self):
+        """Regression test: importing config.py + bot.py on Render must never fail with ImportError."""
+        import os
+        import subprocess
+
+        env = dict(os.environ)
+        env.update({
+            "BOT_TOKEN": "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+            "ADMIN_IDS": "123456789",
+            "MONGO_URI": "mongodb://localhost:27017",
+        })
+        code = (
+            "import unittest.mock as m\n"
+            "from tests.test_allapps_and_server4 import FakeDB\n"
+            "class DummyMongo:\n"
+            "    def __init__(self, *a, **kw): self._d = {}\n"
+            "    def __getitem__(self, k): return self._d.setdefault(k, FakeDB())\n"
+            "with m.patch('pymongo.MongoClient', DummyMongo):\n"
+            "    import config, bot\n"
+            "    assert hasattr(config, 'OTP_MARKUP_PERCENT')\n"
+            "    assert hasattr(config, 'TEMPORASMS_MARKUP_PCT')\n"
+            "    assert set(bot.dp.resolve_used_update_types()) >= {'message', 'callback_query'}\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(pathlib.Path(__file__).resolve().parent.parent),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(proc.returncode, 0, f"bot.py import failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main()
