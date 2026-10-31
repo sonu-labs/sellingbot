@@ -131,6 +131,29 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
     def eff():
         return cfg.effective_settings(settings_col, env_api_key, env_markup, rate)
 
+    _admin_log_backoff_until = 0.0
+
+    async def _send_admin_log_safe(send_coro):
+        nonlocal _admin_log_backoff_until
+        import time as _time
+        now_ts = _time.time()
+        if now_ts < _admin_log_backoff_until:
+            send_coro.close()
+            return
+        try:
+            await send_coro
+        except Exception as exc:
+            err_l = str(exc).lower()
+            if any(tok in err_l for tok in ("chat not found", "bot was kicked", "have no rights", "not enough rights", "peer_id_invalid")):
+                _admin_log_backoff_until = now_ts + 300.0
+                log.warning(
+                    "Admin log chat %s is unreachable (%s) — add/promote the bot in that chat or update ADMIN_LOG_ID.",
+                    admin_log_id,
+                    exc,
+                )
+                return
+            raise
+
     async def log_provider_response(action, params, raw, status, purpose=None):
         """Forward the exact provider body to the configured admin log.
 
@@ -164,11 +187,15 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
         )
         body = str(raw)
         if len(body) <= 2800:
-            await bot.send_message(admin_log_id, metadata + "Raw response:<br><code>" + escape(body or "(empty)") + "</code>")
+            await _send_admin_log_safe(
+                bot.send_message(admin_log_id, metadata + "Raw response:<br><code>" + escape(body or "(empty)") + "</code>")
+            )
             return
         filename = f"temporasms_{str(action)[:40]}.txt"
         document = BufferedInputFile(body.encode("utf-8"), filename=filename)
-        await bot.send_document(admin_log_id, document, caption=metadata + "Raw response attached in full.")
+        await _send_admin_log_safe(
+            bot.send_document(admin_log_id, document, caption=metadata + "Raw response attached in full.")
+        )
 
     async def log_probe_summary(service, country, summary_text, attachment_text, raw_map):
         if not admin_log_id:
@@ -184,9 +211,9 @@ def register_otp_admin_handlers(*, dp, bot, db, users_col, settings_col, admin_i
         if len(attachment_text) > 0:
             filename = f"temporasms_line_probe_{service}_{country}.txt"
             document = BufferedInputFile(full_text.encode("utf-8"), filename=filename)
-            await bot.send_document(admin_log_id, document, caption=header + body)
+            await _send_admin_log_safe(bot.send_document(admin_log_id, document, caption=header + body))
         else:
-            await bot.send_message(admin_log_id, header + body)
+            await _send_admin_log_safe(bot.send_message(admin_log_id, header + body))
 
     setter = getattr(api, "set_response_logger", None)
     if setter:

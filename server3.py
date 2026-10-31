@@ -15,6 +15,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from rich_messages import (
+    RESTRICTED_FLAG_EMOJI_IDS,
     TELEGRAM_EMOJI_ID,
     WHATSAPP_EMOJI_ID,
     tg_icon,
@@ -36,13 +37,10 @@ RETRY_DELAY_SECONDS = 1.5
 RATE_LIMIT_RETRY_DELAY = 3.0
 
 def flag_emoji(alpha2):
-    """Premium country icon for a country code.
-
-    Country-flag emojis have no Premium custom-emoji IDs in the bundled
-    packs (almost none exist), and a normal emoji must never be shown next to
-    Premium ones — so every country uses the Premium globe icon and the
-    country name/code carries the actual identity.
-    """
+    """Return the Unicode country flag mapped in RestrictedEmoji.txt, or globe fallback."""
+    a2 = str(alpha2 or "").strip().upper()
+    if len(a2) == 2 and a2 in RESTRICTED_FLAG_EMOJI_IDS:
+        return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in a2)
     return "🌍"
 
 LZT_COUNTRY_MAP = {
@@ -1939,7 +1937,7 @@ def register_server3_handlers(dp, bot, db, users_col, orders_col, settings_col,
                 f"</blockquote>"
                 f"<p><b>• @{BOTUSER} || @{CHANNEL}</b></p>"
             )
-            
+
             buy_button = InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="• Buy Now •", url=f"https://t.me/{BOTUSER}?start=s3tg")]]
             )

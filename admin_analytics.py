@@ -35,7 +35,14 @@ def safe_amount(value: Any) -> float:
 
 
 def utc_naive(value: Any) -> datetime | None:
-    """Convert a datetime to naive UTC for comparisons with PyMongo dates."""
+    """Convert a datetime or epoch timestamp to naive UTC for comparisons."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if math.isfinite(float(value)) and float(value) > 0:
+            try:
+                return datetime.fromtimestamp(float(value), tz=timezone.utc).replace(tzinfo=None)
+            except (OverflowError, OSError, ValueError):
+                return None
+        return None
     if not isinstance(value, datetime):
         return None
     if value.tzinfo is not None:
@@ -43,12 +50,23 @@ def utc_naive(value: Any) -> datetime | None:
     return value
 
 
+def _doc_datetime(doc: dict[str, Any]) -> datetime | None:
+    """Extract a naive UTC timestamp from created_at, date, or timestamp."""
+    for field in ("created_at", "date", "timestamp"):
+        val = doc.get(field)
+        if val is not None:
+            parsed = utc_naive(val)
+            if parsed is not None:
+                return parsed
+    return None
+
+
 def _status(doc: dict[str, Any]) -> str:
     return str(doc.get("status") or "").strip().casefold()
 
 
 def _date_in_range(doc: dict[str, Any], start: datetime) -> bool:
-    created_at = utc_naive(doc.get("created_at"))
+    created_at = _doc_datetime(doc)
     return created_at is not None and created_at >= start
 
 
@@ -150,7 +168,10 @@ def summarize_analytics(
     account_week = [doc for doc in purchased_orders if _date_in_range(doc, week_start)]
     deposit_today = [doc for doc in paid_transactions if _date_in_range(doc, day_start)]
     deposit_week = [doc for doc in paid_transactions if _date_in_range(doc, week_start)]
-    deposit_yesterday = [doc for doc in paid_transactions if utc_naive(doc.get("created_at")) is not None and yesterday_start <= utc_naive(doc.get("created_at")) < yesterday_end]
+    deposit_yesterday = [
+        doc for doc in paid_transactions
+        if (_doc_datetime(doc) is not None and yesterday_start <= _doc_datetime(doc) < yesterday_end)
+    ]
     smm_today = [doc for doc in smm_rows if _date_in_range(doc, day_start)]
     smm_week = [doc for doc in smm_rows if _date_in_range(doc, week_start)]
 
@@ -207,16 +228,22 @@ def summarize_analytics(
     otp_today_revenue = sum(safe_amount(d.get("price")) for d in otp_today if d.get("refunded") is not True and _status(d) != "cancelled")
     otp_week_count = len(otp_week)
     otp_week_revenue = sum(safe_amount(d.get("price")) for d in otp_week if d.get("refunded") is not True and _status(d) != "cancelled")
-    # Provider cost totals
+    # Provider cost totals (supports USD `cost` or precomputed INR `cost_inr`)
     otp_cost_total = sum(safe_amount(d.get("cost")) for d in otp_rows if d.get("cost") is not None)
-    # live_cost missing on legacy orders — fallback to cost
-    otp_live_cost_total = sum(safe_amount(d.get("live_cost") if d.get("live_cost") is not None else d.get("cost")) for d in otp_rows)
-    # Margin in INR: retail price (INR) - cost USD * rate
-    otp_provider_cost_inr = otp_cost_total * float(rate)
+    otp_live_cost_total = sum(
+        safe_amount(d.get("live_cost") if d.get("live_cost") is not None else d.get("cost"))
+        for d in otp_rows
+    )
+    otp_provider_cost_inr = sum(
+        safe_amount(d.get("cost_inr"))
+        if d.get("cost_inr") is not None
+        else safe_amount(d.get("cost")) * float(rate)
+        for d in otp_rows
+    )
     otp_margin = otp_net - otp_provider_cost_inr
     otp_margin_percent = (otp_margin / otp_net * 100) if otp_net else 0.0
     # Statuses needing attention
-    otp_waiting = sum(1 for d in otp_rows if _status(d) == "waiting")
+    otp_waiting = sum(1 for d in otp_rows if _status(d) in ("waiting", "active"))
     otp_allocating = sum(1 for d in otp_rows if _status(d) == "allocating")
     otp_review = sum(1 for d in otp_rows if _status(d) == "review")
     otp_refunding = sum(1 for d in otp_rows if _status(d) == "refunding")
@@ -225,7 +252,10 @@ def summarize_analytics(
     otp_cancelled = sum(1 for d in otp_rows if _status(d) == "cancelled")
     # Stale allocating/review older than 10 min
     stale_threshold = current - timedelta(minutes=10)
-    otp_stale = sum(1 for d in otp_rows if _status(d) in ("allocating", "review") and (utc_naive(d.get("created_at")) or datetime.max) < stale_threshold)
+    otp_stale = sum(
+        1 for d in otp_rows
+        if _status(d) in ("allocating", "review") and (_doc_datetime(d) or datetime.max) < stale_threshold
+    )
     # Price mismatches from WRONG_MAX_PRICE corrections
     otp_price_mismatches = sum(1 for d in otp_rows if d.get("provider_reported_price") is not None)
     # Top app / country / line

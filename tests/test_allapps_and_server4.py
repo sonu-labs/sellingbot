@@ -551,7 +551,12 @@ class AllAppsAndServer4FlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(completed_orders), 1)
         self.assertEqual(completed_orders[0]["otp"], "884422")
         self.assertEqual(completed_orders[0]["service"], "WhatsApp")
+        self.assertEqual(completed_orders[0]["country"], "India")
+        self.assertIsNotNone(completed_orders[0].get("created_at"))
         self.assertTrue(any("884422" in e["text"] for e in self.bot.edits))
+        # Verify standardized purchase logs in both public sales & admin log channels
+        self.assertGreaterEqual(len(self.bot.sent), 2)
+        self.assertTrue(all("New Virtual Number Purchased" in s["text"] for s in self.bot.sent[-2:]))
 
     async def test_allapps_no_stock_refunds_user_100_percent(self):
         self.s3_state["get_number_reply"] = "NO_NUMBERS"
@@ -632,6 +637,49 @@ class AllAppsAndServer4FlowTests(unittest.IsolatedAsyncioTestCase):
         await loyalty.aspend(1001, 10.0, "s3")
         await loyalty.arefund(1001, 10.0, "s3")
 
+    async def test_services_and_countries_render_10x2_grid_of_20_items(self):
+        # Populate 25 services and 25 countries so page 0 must render 10 rows x 2 columns = 20 items
+        svcs = {"edg": "Telegram", "tss": "WhatsApp"}
+        for idx in range(1, 25):
+            svcs[f"app{idx}"] = f"App {idx:02d}"
+        ctries = {str(i): f"Country {i:02d}" for i in range(1, 26)}
+
+        async def fake_raw_25(action: str, *, lane: str = "rates", **params) -> str:
+            if action == "getOperators":
+                return json.dumps({"operators": ["1"]})
+            if action == "getServices":
+                return json.dumps(svcs)
+            if action == "getCountries":
+                return json.dumps(ctries)
+            if action == "getPricesV3" and not params.get("country"):
+                svc = params.get("service", "edg")
+                return json.dumps({cid: {svc: {"price": 0.2, "count": 10}} for cid in ctries})
+            return "{}"
+
+        allapps.clear_s3_rate_cache()
+        allapps.client.clear_cache()
+        allapps.client._raw_request = fake_raw_25
+
+        # 1. All-OTP Services root: first 10 rows are 2 columns each = 20 service buttons
+        svc_call = await _invoke_callback(self.dp, self.storage, self.bot, "s3_user_root")
+        svc_rows = [
+            row for row in svc_call.message.reply_markup.inline_keyboard
+            if all((b.callback_data or "").startswith("s3s:") for b in row)
+        ]
+        self.assertEqual(len(svc_rows), 10)
+        self.assertTrue(all(len(row) == 2 for row in svc_rows))
+        self.assertEqual(sum(len(row) for row in svc_rows), 20)
+
+        # 2. All-OTP Countries list: first 10 rows are 2 columns each = 20 country buttons
+        ctry_call = await _invoke_callback(self.dp, self.storage, self.bot, "s3a:tg:0", message=svc_call.message)
+        ctry_rows = [
+            row for row in ctry_call.message.reply_markup.inline_keyboard
+            if all((b.callback_data or "").startswith("s3c:") for b in row)
+        ]
+        self.assertEqual(len(ctry_rows), 10)
+        self.assertTrue(all(len(row) == 2 for row in ctry_rows))
+        self.assertEqual(sum(len(row) for row in ctry_rows), 20)
+
 
 class BotStartupImportTests(unittest.TestCase):
     def test_bot_and_config_import_cleanly_from_fresh_process(self):
@@ -666,6 +714,121 @@ class BotStartupImportTests(unittest.TestCase):
             timeout=20,
         )
         self.assertEqual(proc.returncode, 0, f"bot.py import failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+
+
+class RestrictedFlagsAndRichTransportTests(unittest.IsolatedAsyncioTestCase):
+    def test_restricted_emoji_flags_replace_legacy_pack_everywhere(self):
+        import rich_messages as rm
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        raw_items = json.loads((root / "EMOJI_IDS" / "RestrictedEmoji.txt").read_text(encoding="utf-8"))
+        expected_a2 = {}
+        for item in raw_items:
+            em = item.get("emoji") or ""
+            cid = str(item.get("custom_emoji_id") or "")
+            if len(em) == 2 and all(0x1F1E6 <= ord(ch) <= 0x1F1FF for ch in em):
+                a2 = "".join(chr(ord("A") + ord(ch) - 0x1F1E6) for ch in em)
+                expected_a2[a2] = cid
+
+        self.assertGreaterEqual(len(expected_a2), 240)
+        for a2, cid in expected_a2.items():
+            self.assertEqual(rm.RESTRICTED_FLAG_EMOJI_IDS.get(a2), cid)
+            self.assertEqual(allapps.CUSTOM_FLAG_EMOJI_IDS.get(a2), cid)
+            self.assertEqual(server4.CUSTOM_FLAG_EMOJI_IDS.get(a2), cid)
+            flag_uni = "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in a2)
+            self.assertEqual(rm.emoji_id(flag_uni), cid)
+
+        # UK constituent subdivision flags must resolve to RestrictedEmoji.txt IDs
+        self.assertIn("5229192892710402006", allapps.flag_for("England"))
+        self.assertIn("5226852401822057871", allapps.flag_for("Scotland"))
+        self.assertIn("5228957348113955582", allapps.flag_for("Wales"))
+        self.assertIn("5229192892710402006", server4.flag_for("England"))
+
+        # provider.py must have no hardcoded API key
+        prov_src = (root / "provider.py").read_text(encoding="utf-8")
+        self.assertNotRegex(prov_src, r'os\.getenv\(\s*"TEMPORASMS_API_KEY"\s*,\s*"[A-Za-z0-9]{16,}"')
+
+        # Virtual-number modules use "New Virtual Number Purchased"; Server 1/2/3 keep their original log text with <h2> Rich header
+        for mod_name in ("allapps.py", "server4.py"):
+            src = (root / mod_name).read_text(encoding="utf-8")
+            self.assertIn("<h2>✅ New Virtual Number Purchased</h2>", src, mod_name)
+        bot_src = (root / "bot.py").read_text(encoding="utf-8")
+        self.assertIn("<h2>✅ New Number Purchase Successful</h2>", bot_src)
+        self.assertIn("<h2>📢 New Purchase Alert</h2>", bot_src)
+        self.assertNotIn("<pre><u>✅", bot_src)
+        s3_src = (root / "server3.py").read_text(encoding="utf-8")
+        self.assertIn("<h2>✅ New Number Purchase Successful</h2>", s3_src)
+
+        # 20 items per page (10 left, 10 right) for both services and countries
+        self.assertEqual(allapps.SERVICES_PER_PAGE, 20)
+        self.assertEqual(allapps.COUNTRIES_PER_PAGE, 20)
+        self.assertEqual(server4.SERVICES_PER_PAGE, 20)
+        self.assertEqual(server4.COUNTRIES_PER_PAGE, 20)
+
+    def test_rich_html_never_injects_tags_inside_code_or_pre(self):
+        import rich_messages as rm
+
+        sample = (
+            "<h2>📊 Status</h2>"
+            "<blockquote><code>🟢 Running</code> · <pre><u>✅ <b>Alert</b></u></pre></blockquote>"
+        )
+        rich = rm.to_rich_html(sample)
+        for inner in __import__("re").findall(r"<(?:code|pre)\b[^>]*>(.*?)</(?:code|pre)>", rich, flags=__import__("re").S):
+            self.assertNotIn("<tg-emoji", inner)
+            self.assertNotIn("<b>", inner)
+            self.assertNotIn("<u>", inner)
+
+    async def test_unreachable_admin_log_chat_suppresses_repeated_errors(self):
+        from aiogram.exceptions import TelegramBadRequest
+        from aiogram.methods import SendMessage
+        from otp_admin import register_otp_admin_handlers
+
+        calls = []
+
+        class FailingLogBot:
+            async def send_message(self, chat_id, text, **kwargs):
+                calls.append(chat_id)
+                raise TelegramBadRequest(
+                    method=SendMessage(chat_id=chat_id, text="x"),
+                    message="Bad Request: chat not found",
+                )
+
+            async def send_document(self, chat_id, document, **kwargs):
+                calls.append(chat_id)
+                raise TelegramBadRequest(
+                    method=SendMessage(chat_id=chat_id, text="x"),
+                    message="Bad Request: chat not found",
+                )
+
+        captured = {}
+
+        class DummyAPI:
+            def set_response_logger(self, cb):
+                captured["logger"] = cb
+
+            def clear_cache(self):
+                pass
+
+        dp = Dispatcher(storage=MemoryStorage())
+        db = FakeDB()
+        register_otp_admin_handlers(
+            dp=dp,
+            bot=FailingLogBot(),
+            db=db,
+            users_col=db["users"],
+            settings_col=db["settings"],
+            admin_ids=[9999],
+            env_api_key="test-key-1234",
+            env_markup=50.0,
+            rate=100.0,
+            otp_ctx={"api": DummyAPI(), "orders": db["otp_orders"], "views": db["otp_views"], "locks": {}},
+            admin_log_id="-1003441797589",
+        )
+        logger_cb = captured["logger"]
+        # First call catches chat not found cleanly without raising; second call within backoff makes 0 API calls
+        await logger_cb("getServices", {"operator": "1"}, '{"edg":"Telegram"}', 200, "catalog")
+        await logger_cb("getCountries", {"operator": "1"}, '{"22":"India"}', 200, "catalog")
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

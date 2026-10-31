@@ -121,6 +121,43 @@ class AdminAnalyticsTests(unittest.TestCase):
             self.assertIn(key, metrics)
             self.assertIsNotNone(metrics[key])
 
+    def test_legacy_date_and_epoch_timestamp_and_cost_inr_fields(self):
+        now = datetime(2026, 10, 18, 12, 0, 0, tzinfo=timezone.utc)
+        ts_today = datetime(2026, 10, 18, 9, 0, 0, tzinfo=timezone.utc).timestamp()
+        metrics = summarize_analytics(
+            total_users=2,
+            user_docs=[
+                {"joined_at": datetime(2026, 10, 17, 10, 0, 0)},  # yesterday
+                {"joined_at": datetime(2026, 10, 18, 8, 0, 0)},   # today
+            ],
+            transactions=[],
+            withdrawals=[],
+            account_orders=[
+                {"status": "purchased", "price": 80, "date": datetime(2026, 10, 18, 7, 0, 0), "country": "India"},
+            ],
+            smm_orders=[],
+            otp_orders=[
+                {
+                    "status": "completed",
+                    "price": 50.0,
+                    "cost_inr": 25.0,
+                    "timestamp": ts_today,
+                    "service_name": "Telegram",
+                    "country_name": "India",
+                    "route": "1",
+                    "user_id": 10,
+                }
+            ],
+            now=now.replace(tzinfo=None),
+            rate=100.0,
+        )
+        self.assertEqual(metrics["users_yesterday"], 1)
+        self.assertEqual(metrics["users_today"], 1)
+        self.assertEqual(metrics["account_today_revenue"], 80.0)
+        self.assertEqual(metrics["otp_today_revenue"], 50.0)
+        self.assertAlmostEqual(metrics["otp_margin"], 25.0)
+        self.assertAlmostEqual(metrics["otp_margin_percent"], 50.0)
+
 
 if __name__ == "__main__":
     unittest.main()

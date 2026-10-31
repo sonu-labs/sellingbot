@@ -20,13 +20,22 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 try:
-    from config import ADMIN_LOG_ID, SALES_LOG_ID, USD_TO_INR
+    from config import ADMIN_LOG_ID, BOT_USERNAME, SALES_LOG_ID, UPDATES_CHANNEL, USD_TO_INR
 except Exception:
     SALES_LOG_ID = os.getenv("SALES_LOG_ID", "-1002254383562")
     ADMIN_LOG_ID = os.getenv("ADMIN_LOG_ID", "-1003441797589")
+    BOT_USERNAME = os.getenv("BOT_USERNAME", "TGAStoreAPIBot").lstrip("@")
+    UPDATES_CHANNEL = os.getenv("UPDATES_CHANNEL", "TGAForu").lstrip("@")
     USD_TO_INR = float(os.getenv("USD_TO_INR", "100"))
 import provider
 import i18n as _i18n
+from rich_messages import (
+    EMOJI_IDS as _RM_EMOJI_IDS,
+    RESTRICTED_FLAG_EMOJI_IDS,
+    RESTRICTED_FLAG_UNICODE_IDS,
+    TELEGRAM_EMOJI_ID,
+    WHATSAPP_EMOJI_ID,
+)
 from tempora import (
     TemporaClient, ProviderUnavailable, retail_price, cost_inr, search_services, popular_services,
     sid_of, norm, entry_name, PRIORITY_COUNTRIES, LEGACY_NAMES,
@@ -38,7 +47,7 @@ CANCEL_LOCK = 180          # user may cancel only after this many seconds withou
 POLL_EVERY = 4             # seconds between provider polls
 UI_REFRESH_EVERY = 10      # seconds between countdown edits (avoids Telegram flood limits)
 SERVICES_PER_PAGE = 20
-COUNTRIES_PER_PAGE = 16
+COUNTRIES_PER_PAGE = 20
 BUY_COOLDOWN = 3
 WARM_EVERY = int(os.getenv("S3_WARM_EVERY", "300"))   # seconds between background rate refreshes (0 = off)
 WARM_TOP = int(os.getenv("S3_WARM_TOP", "3"))        # how many popular services are kept warm
@@ -227,239 +236,22 @@ LEGACY_PRICE = {(srv, c.lower(), op): bot_p for (srv, c, op, _mp, bot_p) in prov
 
 # =====================================================================
 # Premium emoji configuration
-# Put your Telegram custom-emoji IDs here. Empty values keep Unicode.
-# Country flags use ISO alpha-2 codes in CUSTOM_FLAG_EMOJI_IDS.
+# UI icons come from rich_messages.EMOJI_IDS and all country/subdivision
+# flags come strictly from EMOJI_IDS/RestrictedEmoji.txt.
 # =====================================================================
-CUSTOM_EMOJI_IDS = {
-    "❤️‍🔥": "5255861796350224063","⚠️": "6129782440157256336", "❌": "5974083768233760323", "⬅️": "5409284148491726576", "✅": "5980930633298350051", "🔄": "5346269127059196142", "🛡️": "5042328396193864923",
-    "🔎": "5039649904264217620", "🌍": "5346024644635804737", "💳": "5911101139444567404", "💰": "5296355151743838259", "📦": "5409230963911701228", "🟢": "5913241115489734452", "⏳": "6084396322444544568",
-    "📈": "5039759318556083411", "🔥": "5408849420491962048", "📂": "5409150592188690356", "✖️": "6267000941547885720", "📞": "5172893417717367746", "💬": "6129939837823753679", "🔑": "5278573677900752088",
-    "🔴": "5915991999093149658", "🧪": "5134183530313548836", "◀️": "5287416809404770049", "▶️": "5287267692435218919", "📶": "5469680227716189235", "🛒": "5985605142559329776", "🚨": "5765005232710882842",
-    "⏱️": "4904882772637648609", "🛑": "6084515769780013003", "📋": "5269381442864963988", "➖": "5346176879751612829", "➕": "5192839301674584945", "⚙️": "4967490064234840998", "🛠": "5258023599419171861",
-    "📌": "5409337058193847247", "🗑": "6129486856212979482", "📊": "5042290883949495533", "⚡️": "6323425039311967877", "💯": "6181465091595049176", "🚀": "5254000426243604006", "⭐️": "5388909270316114329",
-    "✨": "5226928895189598791", "📭": "5472239203590888751", "🟡": "5915735340437474837", "🔁": "5346269127059196142", "🔒": "5330066942755615469", "📢": "5399967660052081305", "👤": "5258011929993026890",
-    "📱": "5172893417717367746", "💡": "6014859899979175860", "ℹ️": "5042306247047513767", "🏠": "5321429707688801442", "🌐": "5346024644635804737", "📝": "5273951446981683649", "🔢": "5226702984204797593",
-}
-CUSTOM_FLAG_EMOJI_IDS = {
-    "AD": "5294215205763434181",
-    "AE": "5294314831824835370",
-    "AF": "5291937511591925566",
-    "AG": "5294005972136647964",
-    "AI": "5292186323342350940",
-    "AL": "5294202819077756005",
-    "AM": "5291978717508164018",
-    "AO": "5294516785482062829",
-    "AR": "5292208210495689627",
-    "AS": "5291994273879709721",
-    "AT": "5291975174160145850",
-    "AU": "5294444247779399477",
-    "AW": "5294007002928798927",
-    "AX": "5294077418917616055",
-    "AZ": "5294323533428579078",
-    "BB": "5294526187165471742",
-    "BD": "5291824687096027834",
-    "BE": "5291774466043435275",
-    "BF": "5294153164960848949",
-    "BG": "5294308947719640437",
-    "BH": "5294108398516720753",
-    "BI": "5294051631933967760",
-    "BJ": "5293984969746566866",
-    "BN": "5292098293692650297",
-    "BO": "5294201479047957700",
-    "BR": "5291892229751723900",
-    "BS": "5294031587321600012",
-    "BT": "5294121983498277263",
-    "BW": "5294026179957772585",
-    "BY": "5294134426018536120",
-    "BZ": "5294171848068584842",
-    "CA": "5292290347450259214",
-    "CF": "5294210571493724819",
-    "CG": "5294035229453865597",
-    "CH": "5291791748991835084",
-    "CI": "5293991322003200135",
-    "CK": "5292098684534675100",
-    "CL": "5294231037012888049",
-    "CM": "5291997306126626950",
-    "CN": "5294068833277990704",
-    "CO": "5294010206974397371",
-    "CR": "5292063805105263554",
-    "CU": "5291963947115631526",
-    "CV": "5292203503211535593",
-    "CY": "5294062721539526918",
-    "CZ": "5294242852467923382",
-    "DE": "5292013274815028523",
-    "DJ": "5294127214768468283",
-    "DK": "5294531860817268837",
-    "DM": "5294485513825178032",
-    "DO": "5294522197140857947",
-    "DZ": "5294048127240655242",
-    "EC": "5292083733753517221",
-    "EE": "5291951143818123103",
-    "EG": "5293992082212409502",
-    "ER": "5291922054004625949",
-    "ES": "5294513087515216901",
-    "ET": "5292245976143124155",
-    "EU": "5291992809295861098",
-    "FI": "5294049961191690629",
-    "FM": "5291838156113470124",
-    "FR": "5291817660529533837",
-    "GA": "5294321325815389139",
-    "GB": "5293993521026453119",
-    "GE": "5294349389131697267",
-    "GH": "5294347396266873249",
-    "GI": "5292055799286224027",
-    "GL": "5292014752283774878",
-    "GM": "5294399820637688352",
-    "GN": "5291892096607739008",
-    "GQ": "5292170045416297012",
-    "GR": "5291948395039054764",
-    "GT": "5294336633078831209",
-    "GW": "5294409819321550432",
-    "GY": "5292062692708736193",
-    "HK": "5292166459118606932",
-    "HN": "5291901034434682297",
-    "HR": "5291999676948569127",
-    "HT": "5292045130587462814",
-    "HU": "5294229581018975260",
-    "ID": "5294378161117614233",
-    "IE": "5294471971793293647",
-    "IL": "5294069056616289553",
-    "IM": "5294318478252070646",
-    "IN": "5291933173674957761",
-    "IQ": "5294325010897327367",
-    "IR": "5294220170745630736",
-    "IS": "5294354358408859664",
-    "IT": "5291826830284709120",
-    "JE": "5291950280529697493",
-    "JM": "5294505107465982830",
-    "JO": "5291988613112814801",
-    "JP": "5291799063321139445",
-    "KE": "5292111852904416801",
-    "KG": "5292091954320922577",
-    "KH": "5294225191562400452",
-    "KI": "5294538934628405146",
-    "KM": "5294351381996521508",
-    "KP": "5294193812531333564",
-    "KR": "5294408281723262763",
-    "KW": "5292066437920218075",
-    "KZ": "5294227175837290463",
-    "LA": "5291981530711746037",
-    "LB": "5294193108156699621",
-    "LI": "5292048742654957785",
-    "LK": "5292102670264328257",
-    "LR": "5291793810576137439",
-    "LS": "5292040693886247604",
-    "LT": "5294343084119708700",
-    "LU": "5294423709245787718",
-    "LV": "5292236016113966127",
-    "LY": "5291858711826946840",
-    "MA": "5292108962391414885",
-    "MC": "5294378161117614233",
-    "MD": "5294158486425325375",
-    "MG": "5291991568050312348",
-    "MH": "5294180730060954484",
-    "MK": "5294023611567332075",
-    "ML": "5292086972158858331",
-    "MM": "5294254478944393569",
-    "MN": "5294316532631883496",
-    "MR": "5294429743674840973",
-    "MT": "5294532213004588353",
-    "MU": "5294127824653797277",
-    "MV": "5292004203844097218",
-    "MW": "5294241881805312589",
-    "MX": "5294535073452809778",
-    "MY": "5291858351049696702",
-    "MZ": "5294086708931874940",
-    "NA": "5292021761670404922",
-    "NE": "5291809418487290691",
-    "NG": "5294456308047563965",
-    "NI": "5294240825243358100",
-    "NL": "5291917797692042265",
-    "NO": "5291761718580502030",
-    "NP": "5294458756178924088",
-    "NR": "5294463274484521342",
-    "NU": "5294471336138134209",
-    "NZ": "5294189019347833274",
-    "OM": "5291813666209946812",
-    "PA": "5291959935616178405",
-    "PE": "5292099427564018941",
-    "PG": "5291917995260533077",
-    "PH": "5291798075478661634",
-    "PK": "5291825606219029010",
-    "PL": "5292190970496963836",
-    "PR": "5292121516580820347",
-    "PS": "5294289826525238172",
-    "PT": "5294436555492973610",
-    "PY": "5294525611639852679",
-    "QA": "5292166360334357676",
-    "RO": "5294107724206856227",
-    "RS": "5294458584380230360",
-    "RU": "5294335323113807278",
-    "RW": "5294191265615729158",
-    "SA": "5294163983983463099",
-    "SB": "5294283890880433237",
-    "SC": "5291891186074672309",
-    "SD": "5294177148058228060",
-    "SE": "5291737091238026321",
-    "SG": "5294451304410663668",
-    "SI": "5294279359689938006",
-    "SK": "5294538440707166931",
-    "SL": "5294494314213167952",
-    "SM": "5292147350809106831",
-    "SN": "5292087023698466689",
-    "SO": "5294058817414255960",
-    "SR": "5294396668131692138",
-    "ST": "5292183188016222701",
-    "SV": "5294337307388695687",
-    "SY": "5294013428199869487",
-    "SZ": "5294312482477724867",
-    "TC": "5294320866253884749",
-    "TD": "5291780728105753403",
-    "TG": "5294097669688415562",
-    "TH": "5293994384314882755",
-    "TJ": "5294120269806328883",
-    "TM": "5294098958178603764",
-    "TN": "5294484680601521871",
-    "TO": "5294283689016973348",
-    "TR": "5293993400767367408",
-    "TT": "5294362935458548705",
-    "TW": "5294095745543069603",
-    "TZ": "5292146096678658977",
-    "UA": "5294263837678131580",
-    "UG": "5294192317882716626",
-    "US": "5294244076533600593",
-    "UY": "5291928449210932974",
-    "UZ": "5294217645304864345",
-    "VE": "5294476442854247878",
-    "VI": "5294228039125718124",
-    "VN": "5294235963340379688",
-    "VU": "5294448585696368047",
-    "YE": "5294058972033076492",
-    "ZA": "5294325281480266304",
-    "ZM": "5294100109229838880",
-    "ZW": "5294422158762592930",
-}
-
-# The pack also includes the three UK constituent flags separately from GB.
-# These are matched by exact Unicode flag/name when a service uses England/Scotland/Wales.
-CUSTOM_FLAG_UNICODE_EMOJI_IDS = {
-    "🏴\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e006c\U000e0061\U000e006e\U000e0064\U000e007f": "5294410107084365278",
-    "🏴\U000e0067\U000e0062\U000e0073\U000e0063\U000e006f\U000e0074\U000e006c\U000e0061\U000e006e\U000e0064\U000e007f": "5294434665707368018",
-    "🏴\U000e0067\U000e0062\U000e0077\U000e0061\U000e006c\U000e0065\U000e0073\U000e007f": "5294139949346476093",
-    "🚩": "5294236848103643477",
-}
+CUSTOM_EMOJI_IDS = dict(_RM_EMOJI_IDS)
+CUSTOM_FLAG_EMOJI_IDS = dict(RESTRICTED_FLAG_EMOJI_IDS)
+CUSTOM_FLAG_UNICODE_EMOJI_IDS = dict(RESTRICTED_FLAG_UNICODE_IDS)
 CUSTOM_FLAG_NAME_ALIASES = {
-    "england": "🏴\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e006c\U000e0061\U000e006e\U000e0064\U000e007f",
-    "scotland": "🏴\U000e0067\U000e0062\U000e0073\U000e0063\U000e006f\U000e0074\U000e006c\U000e0061\U000e006e\U000e0064\U000e007f",
-    "wales": "🏴\U000e0067\U000e0062\U000e0077\U000e0061\U000e006c\U000e0065\U000e0073\U000e007f",
+    "england": "🏴\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f",
+    "scotland": "🏴\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f",
+    "wales": "🏴\U000e0067\U000e0062\U000e0077\U000e006c\U000e0073\U000e007f",
 }
 
-# Home-screen Server 3 app icons, in the exact order supplied by the user:
-# 1 Telegram, 2 WhatsApp, 3 Google/Gmail, 4 Instagram, 5 ChatGPT/OpenAI,
-# 6 Twitter/X, 7 Facebook, 8 TikTok, 9 every other app.
+# Home-screen popular app icons
 APP_CUSTOM_EMOJI_IDS = {
-    "telegram": "5345965137863928359",
-    "whatsapp": "5935973359480213803",
+    "telegram": TELEGRAM_EMOJI_ID,
+    "whatsapp": WHATSAPP_EMOJI_ID,
     "google / gmail": "5796209712009581332",
     "instagram": "5348533850429470257",
     "chatgpt / openai": "5796185041717433060",
@@ -475,13 +267,12 @@ def app_custom_emoji_id(label: str) -> str:
     key = norm(label)
     if key in APP_CUSTOM_EMOJI_IDS:
         return APP_CUSTOM_EMOJI_IDS[key]
-    # Also handle common provider labels such as Google/Gmail or ChatGPT/OpenAI.
     aliases = {
         "google gmail": "google / gmail",
         "gmail": "google / gmail",
         "google": "google / gmail",
         "chatgpt openai": "chatgpt / openai",
-        "chatgpt": "chatgpt / openai",
+        "chatgpt": "chatgpt / gmail" if False else "chatgpt / openai",
         "openai": "chatgpt / openai",
         "twitter x": "twitter / x",
         "twitter": "twitter / x",
@@ -503,13 +294,21 @@ def premiumize_text(text: str) -> str:
     if not text or not CUSTOM_EMOJI_IDS:
         return text
     protected = []
+
     def protect(m):
         protected.append(m.group(0))
         return f"\x00S3PE{len(protected)-1}\x00"
-    out = re.sub(r'<tg-emoji\b[^>]*>.*?</tg-emoji>', protect, str(text), flags=re.S)
+
+    # Never inject <tg-emoji> inside <pre> or <code> blocks (invalid in Telegram Rich HTML).
+    out = re.sub(
+        r"<pre\b[^>]*>.*?</pre>|<code\b[^>]*>.*?</code>|<tg-emoji\b[^>]*>.*?</tg-emoji>",
+        protect,
+        str(text),
+        flags=re.I | re.S,
+    )
     for emoji in sorted(CUSTOM_EMOJI_IDS, key=len, reverse=True):
         eid = str(CUSTOM_EMOJI_IDS.get(emoji) or "").strip()
-        if eid:
+        if eid and emoji in out:
             out = out.replace(emoji, _premium_tag(emoji, eid))
     for i, value in enumerate(protected):
         out = out.replace(f"\x00S3PE{i}\x00", value)
@@ -563,26 +362,19 @@ def is_spamming(user_id: int, cooldown: int = BUY_COOLDOWN) -> bool:
     return False
 
 
-# Shown right after the OTP of a WhatsApp order (Server 3).
+# Shown right after the OTP of a WhatsApp order.
 WHATSAPP_SECURITY_TIPS = (
-    "<b>🔐 Secure Your WhatsApp Acc0unt</b>\n"
-    "━━━━━━━━━━━━━━━━━━━━\n"
+    "<h2>🔐 WhatsApp Account Safety</h2>"
     "<blockquote expandable>"
-    "• after login do not use the account for atleast 3-4 days  "
-    "do not message to anyone if u do that , your account will ban instantly \n"
-    "• do not create channel / group until 3 days \n"
-    "• do not login again and again , whenever u login the acc in new device repeat these steps to prevent high risk of account ban \n"
-    "• add your recovery mail , and 2 step verification pass after 24 hours\n"
-    "• Virtual numbers can be recycled later, so the recovery email + 2-step PIN are your real protection.\n"
-    "</blockquote>\n"
-    "<blockquote expandable><i>⚠️ Follow these tips to keep your account safe and avoid bans , we do not give any guarantee or provide refunds , these details are shared with you so u can prevent your acc and there is no full guarantee that your wp acc will still survive  it is platform security system .. by following these steps risk of getting ban reduces a lot.</i></blockquote>"
+    "• Let the new account rest before heavy messaging or group creation.<br>"
+    "• Enable Two-Step Verification and link a recovery email after 24 hours.<br>"
+    "• Avoid repeated sign-ins across multiple devices."
+    "</blockquote>"
 )
 
-# Shown above the country list when the user opens the Telegram service (Server 3).
+# Concise note shown above Telegram SMS verification countries.
 TELEGRAM_SERVICE_NOTE = (
-    "<blockquote>⚠️ <b>Use this service only for Telegram number change.</b>\n"
-    "🛒 To buy ready-made Telegram accounts use <b>Server 2</b> (good quality) "
-    "or <b>Server 4</b> (cheap price, low quality).</blockquote>"
+    "<blockquote>ℹ️ <b>SMS Verification Route</b> — for ready-to-login Telegram accounts, use <b>Server 1–3</b>.</blockquote>"
 )
 
 
@@ -817,7 +609,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         instead of scanning all ~200 countries x every operator)."""
         names = await client.countries()
         q = norm(query)
-        ids = [cid for cid, n in names.items() if q in norm(n)][:8]
+        ids = [cid for cid, n in names.items() if q in norm(n)][:COUNTRIES_PER_PAGE]
         if not ids:
             return []
         res = await asyncio.gather(*[cached_country_offers(sid, cid) for cid in ids], return_exceptions=True)
@@ -843,8 +635,11 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
     #                           ADMIN
     # =================================================================
     def keys_line():
-        return ("🔑 Keys: <b>split</b> ✅ (purchase key + separate live-rates key)" if client.separate_keys
-                else "🔑 Keys: <b>shared</b> ⚠️ — set <code>TEMPORASMS_RATES_API_KEY</code> to give live rates their own key")
+        return (
+            "🔑 <b>API Keys:</b> <code>Split</code> ✅"
+            if client.separate_keys
+            else "🔑 <b>API Keys:</b> <code>Shared</code>"
+        )
 
     def admin_kb():
         active = not is_maintenance_active()
@@ -853,24 +648,24 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             [btn("📊 Overview", "s3_adm_home"), btn("💰 Profit %", "s3_adm_pricing")],
             [btn("📈 Sales & Profit", "s3_adm_stats"), btn("💳 Provider Balance", "s3_adm_balance")],
             [btn("🔄 Refresh Catalog", "s3_adm_refresh")],
-            [btn(f"{status} — Click to {'Disable' if active else 'Enable'}", "s3_adm_toggle_maint")],
+            [btn(f"{status} — {'Disable' if active else 'Enable'}", "s3_adm_toggle_maint")],
             [btn("🧪 Probe API", "s3_adm_probe")],
-            [btn("⬅️ Back to Admin", "admin_refresh")],
+            [btn("⬅️ Admin Panel", "admin_refresh")],
         ])
 
     def admin_text():
         c = cfg()
-        status = "🟢 ACTIVE" if not is_maintenance_active() else "🔴 DISABLED"
+        status = "🟢 <code>ACTIVE</code>" if not is_maintenance_active() else "🔴 <code>DISABLED</code>"
         return (
-            "⚙️ <b>Server 3 Admin Panel</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Status:</b> {status}\n"
-            f"<b>Telegram profit:</b> {float(c.get('tg_markup_pct', c.get('markup_pct', 100))):g}%\n"
-            f"<b>WhatsApp profit:</b> {float(c.get('wa_markup_pct', c.get('markup_pct', 100))):g}%\n"
-            f"<b>Other apps profit:</b> {float(c.get('other_markup_pct', c.get('markup_pct', 100))):g}%\n"
-            f"<b>Minimum profit:</b> ₹{float(c.get('min_profit', 10)):g}\n\n"
-            f"{keys_line()}\n\n"
-            "<i>Use the buttons below to manage Server 3. No pricing command is required.</i>"
+            "<h2>⚙️ Server 3 Admin Panel</h2>"
+            "<blockquote>"
+            f"📡 <b>Status:</b> {status}<br>"
+            f"📱 <b>Telegram Markup:</b> <code>{float(c.get('tg_markup_pct', c.get('markup_pct', 100))):g}%</code><br>"
+            f"💬 <b>WhatsApp Markup:</b> <code>{float(c.get('wa_markup_pct', c.get('markup_pct', 100))):g}%</code><br>"
+            f"🌐 <b>Other Apps Markup:</b> <code>{float(c.get('other_markup_pct', c.get('markup_pct', 100))):g}%</code><br>"
+            f"💵 <b>Minimum Profit:</b> <code>₹{float(c.get('min_profit', 10)):g}</code><br>"
+            f"{keys_line()}"
+            "</blockquote>"
         )
 
     @dp.message(Command("server3"))
@@ -917,15 +712,14 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
     def pricing_text():
         c = cfg()
         return (
-            "💰 <b>Server 3 Profit Percentages</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📱 <b>Telegram:</b> {float(c.get('tg_markup_pct', c.get('markup_pct', 100))):g}%\n"
-            f"💬 <b>WhatsApp:</b> {float(c.get('wa_markup_pct', c.get('markup_pct', 100))):g}%\n"
-            f"🌐 <b>Other apps:</b> {float(c.get('other_markup_pct', c.get('markup_pct', 100))):g}%\n"
-            f"💵 <b>Minimum profit:</b> ₹{float(c.get('min_profit', 10)):g}\n"
-            f"💱 <b>Provider unit → INR:</b> {float(c.get('unit_to_inr', 1)):g}\n\n"
-            "<i>Final price = provider cost converted to INR, plus the selected percentage, "
-            "with the minimum-profit floor applied.</i>"
+            "<h2>💰 Server 3 Markup Controls</h2>"
+            "<blockquote>"
+            f"📱 <b>Telegram:</b> <code>{float(c.get('tg_markup_pct', c.get('markup_pct', 100))):g}%</code><br>"
+            f"💬 <b>WhatsApp:</b> <code>{float(c.get('wa_markup_pct', c.get('markup_pct', 100))):g}%</code><br>"
+            f"🌐 <b>Other Apps:</b> <code>{float(c.get('other_markup_pct', c.get('markup_pct', 100))):g}%</code><br>"
+            f"💵 <b>Min Profit Floor:</b> <code>₹{float(c.get('min_profit', 10)):g}</code><br>"
+            f"💱 <b>USD → INR:</b> <code>₹{float(c.get('unit_to_inr', 1)):g}</code>"
+            "</blockquote>"
         )
 
     def pricing_kb():
@@ -1084,21 +878,24 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
     def stats_text(today, week, allt, active, cats=None):
         def line(label, a):
             profit = float(a.get("rev", 0) or 0) - float(a.get("cost", 0) or 0)
-            pct = f" ({profit / a['cost'] * 100:.0f}% on cost)" if a.get("cost") else ""
-            return f"<b>{label}</b>: {a.get('n', 0)} sales · revenue {short(round(a.get('rev', 0), 2))} · profit {short(round(profit, 2))}{pct}"
+            return (
+                f"• <b>{label}:</b> <code>{a.get('n', 0)}</code> · "
+                f"Rev <code>{short(round(a.get('rev', 0), 2))}</code> · "
+                f"Profit <code>{short(round(profit, 2))}</code>"
+            )
+
         t = (
-            "📈 <b>Server 3 — Sales & Profit</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"{line('Today (IST)', today)}\n"
-            f"{line('Last 7 days', week)}\n"
-            f"{line('All time', allt)}\n\n"
-            f"🟢 <b>Active orders:</b> {active}\n"
+            "<h2>📈 Server 3 — Sales &amp; Profit</h2>"
+            "<blockquote>"
+            f"{line('Today', today)}<br>"
+            f"{line('7 Days', week)}<br>"
+            f"{line('All Time', allt)}<br>"
+            f"🟢 <b>Active Orders:</b> <code>{active}</code>"
+            "</blockquote>"
         )
         if cats:
-            t += "\n<b>By application</b>\n"
-            for name in ("Telegram", "WhatsApp", "Other"):
-                t += line(name, cats[name]) + "\n"
-        t += "\n<i>Profit = sale price − provider cost recorded when the number was purchased.</i>"
+            cat_lines = "<br>".join(line(name, cats[name]) for name in ("Telegram", "WhatsApp", "Other"))
+            t += f"<blockquote>📦 <b>By App</b><br>{cat_lines}</blockquote>"
         return t
 
     @scb(F.data == "s3_adm_stats")
@@ -1188,82 +985,90 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         return popular_services(cat)
 
     def busy_kb(retry_cb, back_cb):
-        return InlineKeyboardMarkup(inline_keyboard=[[btn("🔄 Try again", retry_cb, style="success")],
-                                                     [btn("⬅️ Back", back_cb, style="danger")]])
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [btn("🔄 Retry", retry_cb)],
+            [btn("⬅️ Back", back_cb)],
+        ])
 
-    BUSY_TXT = "⚠️ <b>Provider is busy right now</b>\nLive rates could not be loaded. You were not charged — please try again in a moment."
+    BUSY_TXT = (
+        "<h2>⚠️ Route Busy</h2>"
+        "<blockquote>Live rates are temporarily unavailable. Nothing was charged — tap Retry in a moment.</blockquote>"
+    )
 
     def primary_service_sid(cat, wanted):
         target = norm(wanted)
-        # Exact name wins. This avoids showing a similarly named WhatsApp
-        # provider entry with only one country when the real "WhatsApp"
-        # service is available in the catalog.
         for sid, entry in cat.items():
             if norm(entry_name(entry)) == target:
                 return sid
         matches = [(sid, e) for sid, e in cat.items() if target in norm(entry_name(e))]
         return matches[0][0] if matches else None
 
-    async def render_root(target):
-        try:
-            cat = await client.services()
-        except ProviderUnavailable:
-            return await edit(target, BUSY_TXT, busy_kb("s3_user_root", "buy"))
-        pop = popular_cached(cat)
-
-        # Always pin the main Telegram + WhatsApp services, then fill the
-        # remaining slots with the existing popular list (9 apps total).
-        pinned = []
+    def ordered_services(cat):
+        """Return [(display_label, sid), ...] with top popular apps first, then alphabetical."""
+        out = []
         seen = set()
-        for label, wanted in (("📱 Telegram", "Telegram"), ("💬 WhatsApp", "WhatsApp")):
+        for label, wanted in (("Telegram", "Telegram"), ("WhatsApp", "WhatsApp")):
             sid = primary_service_sid(cat, wanted)
             if sid and sid not in seen:
-                pinned.append((label, sid))
+                out.append((label, sid))
                 seen.add(sid)
-        for item in pop:
+        for item in popular_cached(cat):
             if not isinstance(item, (tuple, list)) or len(item) != 2:
                 continue
             label, sid = item
-            # Keep the dedicated/main WhatsApp button on the home screen,
-            # but do not show the separate WhatsApp Business service there.
-            # Users can still find it through Search All Services if it exists
-            # in the provider catalog.
             entry = cat.get(sid)
             service_name = norm(entry_name(entry) or str(label))
             if service_name in {"whatsapp business", "wa business", "whatsappbusiness"}:
                 continue
+            clean_lbl = re.sub(r"^[^A-Za-z0-9]+\s*", "", str(label)).strip() or entry_name(entry, sid)
             if sid in cat and sid not in seen:
-                pinned.append((str(label), sid))
+                out.append((clean_lbl, sid))
                 seen.add(sid)
-            if len(pinned) >= 9:
-                break
-        pinned = pinned[:9]
+        for sid, e in sorted(cat.items(), key=lambda kv: entry_name(kv[1], kv[0]).lower()):
+            if sid not in seen:
+                out.append((entry_name(e, sid), sid))
+                seen.add(sid)
+        return out
+
+    async def render_service_page(target, page: int = 0):
+        try:
+            cat = await client.services()
+        except ProviderUnavailable:
+            return await edit(target, BUSY_TXT, busy_kb("s3_user_root", "buy"))
+        items = ordered_services(cat)
+        pages = max(1, (len(items) + SERVICES_PER_PAGE - 1) // SERVICES_PER_PAGE)
+        page = max(0, min(page, pages - 1))
+        chunk = items[page * SERVICES_PER_PAGE:(page + 1) * SERVICES_PER_PAGE]
 
         text = (
-            "❤️‍🔥 <b>TGA Store</b>"
-            "<b> — SMS &amp; Virtual Number Activation</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "<blockquote>⚡ <b>{n}+</b> apps &amp; platforms.\n"
-            "🌍 Numbers from many countries, live stock &amp; prices.\n"
-            "💯 <b>Auto refund</b> if no SMS arrives.\n"
-            "🚀 OTP delivered straight into this chat.</blockquote>\n"
-            "⭐ <b>Popular Services:</b>"
-        ).format(n=f"{len(cat):,}")
+            "<h2>📲 TGA Store — Instant OTP</h2>"
+            "<blockquote>"
+            f"📦 <b>Apps:</b> <code>{len(cat):,}</code> · <b>Page:</b> <code>{page + 1}/{pages}</code><br>"
+            "🌍 <b>Coverage:</b> <code>Global Live Routes</code> · <code>Auto-Refund</code>"
+            "</blockquote>"
+        )
         kb = InlineKeyboardBuilder()
-        for label, sid in pinned:
-            # Inline buttons cannot contain <tg-emoji> markup. Use the Bot API
-            # custom-emoji icon field so these premium app icons render correctly.
-            clean_label = re.sub(r"^[^A-Za-z0-9]+\s*", "", label).strip()
+        for label, sid in chunk:
+            clean_label = re.sub(r"^[^A-Za-z0-9]+\s*", "", str(label)).strip()[:28]
             kb.add(btn(
                 clean_label,
                 f"s3s:{sid}:0",
-                icon_custom_emoji_id=app_custom_emoji_id(label),
+                icon_custom_emoji_id=app_custom_emoji_id(clean_label),
             ))
         kb.adjust(2)
-        kb.row(btn(f"🔎 Search All {len(cat):,} Services", "s3q", style="success"))
-        kb.row(btn("📂 Browse All Services", "s3pg:0"), btn("ℹ️ Help", "s3help"))
-        kb.row(btn("⬅️ Back", "back_main", style="danger"))
+        if pages > 1:
+            nav = []
+            if page > 0:
+                nav.append(btn("◀️ Prev", f"s3pg:{page - 1}"))
+            nav.append(btn(f"{page + 1}/{pages}", "s3n"))
+            if page < pages - 1:
+                nav.append(btn("Next ▶️", f"s3pg:{page + 1}"))
+            kb.row(*nav)
+        kb.row(btn(f"🔎 Search ({len(cat):,})", "s3q"), btn("⬅️ Back", "back_main"))
         await edit(target, text, kb.as_markup())
+
+    async def render_root(target):
+        await render_service_page(target, 0)
 
     async def open_service_direct(msg: Message, wanted: str):
         if is_maintenance_active():
@@ -1361,48 +1166,16 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
     @scb(F.data == "s3help")
     async def s3_help(call: CallbackQuery):
         await call.answer()
-
         help_text = (
-            "ℹ️ <b>About Server 3/ vth panel Virtual Number Activation</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-
-            "<b>What Services Are Provided?</b>\n"
-            "Server 3 / All apps acc connects directly to <b>VTH Panel</b> global carrier "
-            "telecom routes, providing fresh, private, disposable mobile "
-            "numbers across <b>200+ countries</b> to receive SMS "
-            "verification codes &amp; OTPs.\n\n"
-
-            "<b>Key Capabilities &amp; Highlights:</b>\n"
-
-            "• 📱 <b>Telegram:</b> Seamlessly change your account number "
-            "or register fresh Telegram accounts with clean foreign numbers.\n"
-
-            "• 💬 <b>WhatsApp &amp; WA Business:</b> Instant verification "
-            "codes for WhatsApp personal or business accounts.\n"
-
-            "• 💡 <b>AI &amp; Cloud:</b> Verification support for OpenAI, "
-            "ChatGPT, Claude, Google Cloud, AWS, Microsoft.\n"
-
-            "• 🌐 <b>Social Networks:</b> Instagram, Threads, TikTok, "
-            "Twitter / X, Discord, Facebook, Snapchat, Reddit.\n"
-
-            "• 💰 <b>Shopping &amp; Finance:</b> Amazon, Netflix, Steam, "
-            "Tinder, Uber, Binance, PayPal, Bybit, Web3Auth.\n\n"
-
-            "🛡️ <b>100% Zero-Risk Money-Back Guarantee:</b>\n"
-            "<blockquote>• Numbers are allocated for <b>5 minutes</b>.\n"
-            "• If no SMS arrives within 5 minutes, the order is "
-            "automatically cancelled and your wallet is <b>100% refunded</b>.\n"
-            "• You can also cancel manually after <b>3 minutes</b> if needed.</blockquote>\n"
-           
+            "<h2>ℹ️ TGA Store — Instant OTP</h2>"
+            "<blockquote>"
+            "• Private disposable virtual numbers across 200+ countries.<br>"
+            "• Valid for <b>5 minutes</b> per order.<br>"
+            "• <b>100% auto-refund</b> if no OTP arrives in time."
+            "</blockquote>"
         )
-
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [btn("⬅️ Back","s3_user_root",style="danger")]])
-
+        kb = InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Back", "s3_user_root")]])
         await edit(call, help_text, kb)
-
 
     @scb(F.data == "s3n")
     async def s3_noop(call: CallbackQuery):
@@ -1410,26 +1183,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
 
     # ---- browse all ----
     async def render_browse(target, page):
-        cat = await client.services()
-        items = sorted(cat.items(), key=lambda kv: entry_name(kv[1], kv[0]).lower())
-        pages = max(1, (len(items) + SERVICES_PER_PAGE - 1) // SERVICES_PER_PAGE)
-        page = max(0, min(page, pages - 1))
-        chunk = items[page * SERVICES_PER_PAGE:(page + 1) * SERVICES_PER_PAGE]
-        text = (f"📂 <b>All Available Services ({len(items):,} total)</b>\n"
-                f"<i>Page {page + 1} of {pages}</i>\nTap any service to see countries &amp; live pricing:")
-        kb = InlineKeyboardBuilder()
-        for sid, e in chunk:
-            kb.button(text=entry_name(e, sid)[:28], callback_data=f"s3s:{sid}:0")
-        kb.adjust(2)
-        nav = []
-        if page > 0:
-            nav.append(btn("◀️ Prev", f"s3pg:{page - 1}"))
-        nav.append(btn(f"{page + 1}/{pages}", "s3n"))
-        if page < pages - 1:
-            nav.append(btn("Next ▶️", f"s3pg:{page + 1}"))
-        kb.row(*nav)
-        kb.row(btn("🔎 Search", "s3q", style="success"), btn("⬅️ Back", "s3_user_root", style="danger"))
-        await edit(target, text, kb.as_markup())
+        await render_service_page(target, page)
 
     @scb(F.data.startswith("s3pg:"))
     async def browse_cb(call: CallbackQuery):
@@ -1442,35 +1196,42 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         await call.answer()
         await state.set_state(Server3UserState.waiting_service_search)
         await state.update_data(prompt_id=call.message.message_id, chat_id=call.message.chat.id)
-        await edit(call,
-                   "🔎 <b>Search Any Service</b>\n\nSend the name of the app you want to activate.\n"
-                   "<i>Examples:</i> <code>Netflix</code>, <code>OpenAI</code>, <code>Binance</code>, "
-                   "<code>Amazon</code>, <code>Uber</code>, <code>Apple</code>",
-                   InlineKeyboardMarkup(inline_keyboard=[[btn("✖️ Cancel Search", "s3_user_root", style="danger")]]))
+        await edit(
+            call,
+            "<h2>🔎 Search App</h2>"
+            "<blockquote>Send the app name (e.g. <code>Telegram</code>, <code>WhatsApp</code>, <code>Google</code>, <code>Netflix</code>).</blockquote>",
+            InlineKeyboardMarkup(inline_keyboard=[[btn("✖️ Cancel", "s3_user_root")]]),
+        )
 
     @dp.message(StateFilter(Server3UserState.waiting_service_search), F.text)
     async def search_text(msg: Message, state: FSMContext):
         data = await state.get_data()
         q = (msg.text or "").strip()
         try:
-            await msg.delete()  # keep the chat clean
+            await msg.delete()
         except Exception:
             pass
         cat = await client.services()
         results = search_services(cat, q)
-        cancel_row = [btn("✖️ Cancel Search", "s3_user_root", style="danger")]
+        cancel_row = [btn("✖️ Cancel", "s3_user_root")]
         if not results:
-            text = (f"🔎 <b>Search Any Service</b>\n\n❌ Nothing found for <b>{escape(q[:40])}</b>.\n"
-                    "Try another name:")
+            text = (
+                "<h2>🔎 No Match Found</h2>"
+                f"<blockquote>No service matched <code>{escape(q[:40])}</code>. Send another name:</blockquote>"
+            )
             kb = InlineKeyboardMarkup(inline_keyboard=[cancel_row])
         else:
             await state.clear()
-            text = f"🔎 <b>Results for “{escape(q[:40])}”</b> — {len(results)} found\nTap a service:"
+            text = (
+                "<h2>🔎 Search Results</h2>"
+                f"<blockquote>🎯 <b>Query:</b> <code>{escape(q[:40])}</code> · <b>Found:</b> <code>{len(results)}</code></blockquote>"
+            )
             b = InlineKeyboardBuilder()
-            for sid, e in results[:20]:
-                b.button(text=entry_name(e, sid)[:28], callback_data=f"s3s:{sid}:0")
+            for sid, e in results[:SERVICES_PER_PAGE]:
+                lbl = entry_name(e, sid)[:28]
+                b.add(btn(lbl, f"s3s:{sid}:0", icon_custom_emoji_id=app_custom_emoji_id(lbl)))
             b.adjust(2)
-            b.row(btn("🔎 Search Again", "s3q", style="success"), btn("⬅️ Back", "s3_user_root", style="danger"))
+            b.row(btn("🔎 Search Again", "s3q"), btn("⬅️ Back", "s3_user_root"))
             kb = b.as_markup()
         try:
             await bot.edit_message_text(premiumize_text(text), chat_id=data["chat_id"], message_id=data["prompt_id"],
@@ -1481,7 +1242,6 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
 
     # ---- countries ----
     async def _warm_full(sid):
-        """Background full-country scan so the 'All Countries' page is instant next time."""
         try:
             await cached_service_offers(sid, full=True)
         except Exception as e:
@@ -1494,8 +1254,6 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             return await render_root(target)
         svc_title = entry_name(svc, sid)
         title = escape(svc_title)
-        # fast=True (WhatsApp / direct opens): never make the user wait for the ~200-country scan.
-        # Show the priority countries instantly and warm the full list in the background.
         if full and fast and not _cache_fresh(_s3_offer_cache.get((sid, True)), RATE_CACHE_TTL) \
                 and not client.has_cached(f"offers:{sid}:1"):
             spawn(_warm_full(sid))
@@ -1504,40 +1262,37 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             if query:
                 rows = await asyncio.wait_for(country_rows_query(sid, query), 20)
             else:
-                if not client.has_cached(f"offers:{sid}:{int(full)}"):   # only show the spinner when we really must wait
-                    await edit(target, f"⏳ <i>Fetching live rates for {title}…</i>")
-                # hard cap: the screen can never sit on "Fetching live rates" forever
+                if not client.has_cached(f"offers:{sid}:{int(full)}"):
+                    await edit(target, f"<h2>⏳ {title}</h2><blockquote>Loading live countries &amp; rates…</blockquote>")
                 rows = await asyncio.wait_for(country_rows(sid, full=full), 25)
         except (ProviderUnavailable, asyncio.TimeoutError):
-            return await edit(target, f"<b>Service: {title}</b>\n━━━━━━━━━━━━━━━━━━━━\n{BUSY_TXT}",
-                              busy_kb(f"s3r:{sid}", "s3_user_root"))
+            return await edit(target, BUSY_TXT, busy_kb(f"s3r:{sid}", "s3_user_root"))
         if not rows:
             rows_kb = []
             if query:
-                rows_kb.append([btn("🔎 Search Again", f"s3cq:{sid}", style="success")])
-            rows_kb.append([btn("⬅️ Back", f"s3s:{sid}:0" if query else "s3_user_root", style="danger")])
-            msg = ("❌ No matching country in stock." if query
-                   else "📭 <b>Out of stock</b> — no numbers for this service right now.")
-            return await edit(target, f"<b>Service: {title}</b>\n━━━━━━━━━━━━━━━━━━━━\n{msg}",
-                              InlineKeyboardMarkup(inline_keyboard=rows_kb))
+                rows_kb.append([btn("🔎 Search Again", f"s3cq:{sid}")])
+            rows_kb.append([btn("⬅️ Back", f"s3s:{sid}:0" if query else "s3_user_root")])
+            empty_msg = "No matching country in stock." if query else "No countries currently have live stock."
+            return await edit(
+                target,
+                f"<h2>📭 {title}</h2><blockquote>{empty_msg}</blockquote>",
+                InlineKeyboardMarkup(inline_keyboard=rows_kb),
+            )
         pages = max(1, (len(rows) + COUNTRIES_PER_PAGE - 1) // COUNTRIES_PER_PAGE)
         page = max(0, min(page, pages - 1))
-        chunk = rows if query else rows[page * COUNTRIES_PER_PAGE:(page + 1) * COUNTRIES_PER_PAGE]
-        text = (f"📦 <b>Service: {title}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"Select a country to view available virtual numbers &amp; live rates:\n"
-                f"<i>{len(rows)} countries in stock</i>")
-        if norm(svc_title) == "telegram":
-            text = TELEGRAM_SERVICE_NOTE + "\n\n" + text
+        chunk = rows[:COUNTRIES_PER_PAGE] if query else rows[page * COUNTRIES_PER_PAGE:(page + 1) * COUNTRIES_PER_PAGE]
+        extra_note = TELEGRAM_SERVICE_NOTE if norm(svc_title) == "telegram" else ""
+        text = (
+            f"<h2>📲 {title} — Select Country</h2>"
+            f"{extra_note}"
+            f"<blockquote>🌍 <b>In Stock:</b> <code>{len(rows)} Countries</code> · <b>Page:</b> <code>{page + 1}/{pages}</code></blockquote>"
+        )
         pfx = "s3a" if full else "s3s"
         kb = InlineKeyboardBuilder()
         for r in chunk:
-            # Country flags are rendered as Telegram custom-emoji entities in text,
-            # but inline-button labels do not parse HTML/entities.  Use btn() so
-            # the leading <tg-emoji> is converted to icon_custom_emoji_id and
-            # the raw entity markup never reaches the Telegram button text.
             kb.add(btn(
                 f"{r['flag']} {r['name'][:20]} · {short(r['min_price'])}",
-                f"s3c:{sid}:{r['cid']}"
+                f"s3c:{sid}:{r['cid']}",
             ))
         kb.adjust(2)
         if not query and pages > 1:
@@ -1548,10 +1303,10 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             if page < pages - 1:
                 nav.append(btn("▶️", f"{pfx}:{sid}:{page + 1}"))
             kb.row(*nav)
-        kb.row(btn("🔎 Search Country", f"s3cq:{sid}", style="success"), btn("🔄 Refresh", f"s3r:{sid}"))
+        kb.row(btn("🔎 Search Country", f"s3cq:{sid}"), btn("🔄 Refresh", f"s3r:{sid}"))
         if not full and not query:
             kb.row(btn("🌍 All Countries", f"s3a:{sid}:0"))
-        kb.row(btn("⬅️ Back", "s3_user_root", style="danger"))
+        kb.row(btn("⬅️ Back", "s3_user_root"))
         await edit(target, text, kb.as_markup())
 
     @scb(F.data.startswith("s3s:"))
@@ -1584,8 +1339,12 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         await call.answer()
         await state.set_state(Server3UserState.waiting_country_search)
         await state.update_data(sid=sid, prompt_id=call.message.message_id, chat_id=call.message.chat.id)
-        await edit(call, "🔎 <b>Search Country</b>\n\nSend a country name (e.g. <code>India</code>, <code>Brazil</code>):",
-                   InlineKeyboardMarkup(inline_keyboard=[[btn("✖️ Cancel", f"s3s:{sid}:0", style="danger")]]))
+        await edit(
+            call,
+            "<h2>🔎 Search Country</h2>"
+            "<blockquote>Send a country name (e.g. <code>India</code>, <code>USA</code>, <code>Brazil</code>).</blockquote>",
+            InlineKeyboardMarkup(inline_keyboard=[[btn("✖️ Cancel", f"s3s:{sid}:0")]]),
+        )
 
     @dp.message(StateFilter(Server3UserState.waiting_country_search), F.text)
     async def country_search_text(msg: Message, state: FSMContext):
@@ -1596,7 +1355,7 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         except Exception:
             pass
 
-        class _PromptMsg:  # lets render_countries edit the stored prompt message
+        class _PromptMsg:
             async def edit_text(self, text, reply_markup=None, parse_mode=None):
                 try:
                     await bot.edit_message_text(premiumize_text(text), chat_id=data["chat_id"], message_id=data["prompt_id"],
@@ -1622,29 +1381,32 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             return await edit(target, BUSY_TXT, busy_kb(f"s3c:{sid}:{cid}", f"s3s:{sid}:0"))
         if not ops:
             return await render_countries(target, sid, 0)
-        text = (f"📶 <b>Select Operator</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"• <b>Service:</b> {escape(entry_name(svc, sid))}\n"
-                f"• <b>Country:</b> {flag_for(cname)} {escape(cname)}\n"
-                "<blockquote>Prices &amp; stock are live. 🔥 = best price. If an operator runs out, you will be told and brought back here.</blockquote>")
-        if note:
-            text = f"{note}\n\n{text}"
+        note_block = f"<blockquote>{note}</blockquote>" if note else ""
+        text = (
+            "<h2>📶 Select Operator</h2>"
+            f"{note_block}"
+            "<blockquote>"
+            f"📦 <b>App:</b> {escape(entry_name(svc, sid))}<br>"
+            f"🌍 <b>Country:</b> {flag_for(cname)} {escape(cname)}"
+            "</blockquote>"
+        )
         kb = InlineKeyboardBuilder()
         for i, o in enumerate(ops):
             stock = f"{o['count']}" if o["count"] < 1000 else "999+"
             best = "🔥 " if i == 0 and len(ops) > 1 else ""
-            kb.row(btn(f"{best}{stock_dot(o['count'])} Operator {o['op']} · {short(o['price'])} · {stock} left",
+            kb.row(btn(f"{best}{stock_dot(o['count'])} Operator {o['op']} · {short(o['price'])} · {stock}",
                        f"s3o:{sid}:{cid}:{o['op']}"))
-        kb.row(btn("🔄 Refresh", f"s3rc:{sid}:{cid}"), btn("🌍 Change Country", f"s3s:{sid}:0"))
-        kb.row(btn("⬅️ Back", f"s3s:{sid}:0", style="danger"))
+        kb.row(btn("🔄 Refresh", f"s3rc:{sid}:{cid}"), btn("🌍 Countries", f"s3s:{sid}:0"))
+        kb.row(btn("⬅️ Back", f"s3s:{sid}:0"))
         await edit(target, text, kb.as_markup())
 
     @scb(F.data.startswith("s3c:"))
     async def operators_cb(call: CallbackQuery):
         _, sid, cid = call.data.split(":")
         await call.answer()
-        if not co_ready(sid, cid):      # slow path: give instant feedback instead of a frozen screen
+        if not co_ready(sid, cid):
             try:
-                await edit(call, "⏳ <b>Loading operators…</b>\n<i>Fetching live rates, one moment.</i>", None)
+                await edit(call, "<h2>⏳ Loading Operators</h2><blockquote>Fetching live routes…</blockquote>", None)
             except Exception:
                 pass
         await render_operators(call, sid, cid)
@@ -1657,12 +1419,12 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         await call.answer("🔄 Updated")
         await render_operators(call, sid, cid)
 
-    # ---- confirm (does a LIVE stock check first) ----
+    # ---- confirm ----
     async def go_back_no_stock(call, sid, cid, op, toast=True):
         drop_offer_cache(sid)
         if toast:
-            await call.answer(f"❌ Operator {op} has no numbers right now.", show_alert=False)
-        await render_operators(call, sid, cid, note=f"⚠️ <b>Operator {op}</b> is out of stock.")
+            await call.answer(f"Operator {op} out of stock.", show_alert=False)
+        await render_operators(call, sid, cid, note=f"⚠️ <b>Operator {op}</b> sold out — choose another route.")
 
     @scb(F.data.startswith("s3o:"))
     async def confirm_cb(call: CallbackQuery):
@@ -1672,13 +1434,9 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         await render_confirm(call, sid, cid, op)
 
     async def render_confirm(call, sid, cid, op):
-        # Confirmation uses the operator snapshot already loaded while browsing.
-        # The final Purchase click performs the authoritative live check.
         rows, cname = await cached_country_offers(sid, cid)
         live = next((dict(r) for r in rows
                      if str(r.get("operator")) == str(op) and int(r.get("count", 0) or 0) > 0), None)
-                # If the operator snapshot was fetched very recently, reuse it for
-        # the immediate Purchase click instead of calling getPricesV3 twice.
         if live and LIVE_REUSE_TTL > 0:
             snapshot = _s3_operator_cache.get((sid, cid))
             if snapshot and (time.time() - float(snapshot.get("t", 0))) <= LIVE_REUSE_TTL:
@@ -1699,28 +1457,30 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         price = price_for(sid, cname, op, live["cost"])
         bal = float((u or {}).get("balance", 0.0))
         enough = bal >= price - 1e-6
-        text = (
-            "🛒 <b>Virtual Number Activation</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-            "<blockquote>"
-            f"• <b>Service:</b> {escape(entry_name(cat[sid], sid))}\n"
-            f"• <b>Country:</b> {flag_for(cname)} {escape(cname)}\n"
-            f"• <b>Operator:</b> Operator {op}\n"
-            f"• <b>Available:</b> {live['count']} numbers\n"
-            f"• <b>Price:</b> {_fmt(price)}"
-            "</blockquote>\n"
-            f"💳 <b>Your balance:</b> {_fmt(bal)}"
-            + (f"  →  after: {_fmt(max(0.0, bal - price))}\n" if enough else f"  ❌ short by {_fmt(price - bal)}\n") +
-            "\n⚠️ <b>Rules</b>\n"
-            f"• Number is reserved for {OTP_TIMEOUT // 60} minutes to receive your OTP\n"
-            "• 100% auto refund if no SMS arrives\n"
-            "• Non-refundable once the verification code has arrived\n"
-            f"• Cancel unlocks after {CANCEL_LOCK // 60} minutes without OTP"
+        wallet_note = (
+            f" (After: <code>{_fmt(max(0.0, bal - price))}</code>)"
+            if enough
+            else f" · ❌ Need <code>{_fmt(price - bal)}</code>"
         )
-        buy_row = ([btn(f"✅ Purchase — {short(price)}", f"s3b:{sid}:{cid}:{op}:{price:.2f}", style="success")] if enough
-                   else [btn("💰 Recharge", "recharge", style="success")])
+        text = (
+            "<h2>🛒 Confirm Virtual Number</h2>"
+            "<blockquote>"
+            f"📦 <b>App:</b> {escape(entry_name(cat[sid], sid))}<br>"
+            f"🌍 <b>Country:</b> {flag_for(cname)} {escape(cname)}<br>"
+            f"📶 <b>Route:</b> <code>Operator {op}</code> · <b>Stock:</b> <code>{live['count']}</code><br>"
+            f"💰 <b>Price:</b> <code>{_fmt(price)}</code><br>"
+            f"💳 <b>Wallet:</b> <code>{_fmt(bal)}</code>{wallet_note}"
+            "</blockquote>"
+            f"<p>🛡️ <i>{OTP_TIMEOUT // 60}m validity · Auto-refund if no SMS arrives.</i></p>"
+        )
+        buy_row = (
+            [btn(f"✅ Buy Now · {short(price)}", f"s3b:{sid}:{cid}:{op}:{price:.2f}")]
+            if enough
+            else [btn("💳 Recharge Wallet", "recharge")]
+        )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             buy_row,
-            [btn("🔁 Switch Operator", f"s3c:{sid}:{cid}"), btn("🌍 Change Country", f"s3s:{sid}:0")],
+            [btn("🔁 Operators", f"s3c:{sid}:{cid}"), btn("🌍 Countries", f"s3s:{sid}:0")],
         ])
         await edit(call, text, kb)
 
@@ -1838,24 +1598,20 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
     # =================================================================
     def wait_view(task, elapsed):
         left = int(max(0, OTP_TIMEOUT - elapsed))
-        filled = round(10 * left / OTP_TIMEOUT)
-        bar = "▰" * filled + "▱" * (10 - filled)
         text = (
-            "<blockquote>✅ <b>Number Reserved</b></blockquote>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📞 <b>Number:</b> <code>+{task['phone']}</code>\n"
-            f"📦 <b>Service:</b> {escape(task['service'])}\n"
-            f"🌍 <b>Country:</b> {flag_for(task['country'])} {escape(task['country'])} · Operator {task['operator']}\n"
-            f"💬 <b>OTP:</b> <code>Waiting for message…</code>\n"
-            f"⏱ <b>Time left:</b> {left // 60}:{left % 60:02d}  {bar}\n\n"
-            "<blockquote expandable><i>The OTP is delivered here automatically. "
-            f"Cancel unlocks after {CANCEL_LOCK // 60} minutes without OTP; "
-            f"after {OTP_TIMEOUT // 60} minutes the order is cancelled and refunded automatically.</i></blockquote>"
+            "<h2>⏳ Waiting for OTP</h2>"
+            "<blockquote>"
+            f"📞 <b>Number:</b> <code>+{task['phone']}</code><br>"
+            f"📦 <b>App:</b> {escape(task['service'])}<br>"
+            f"🌍 <b>Country:</b> {flag_for(task['country'])} {escape(task['country'])} (<code>Op {task['operator']}</code>)<br>"
+            f"🔑 <b>OTP:</b> <code>Listening for SMS…</code><br>"
+            f"🕒 <b>Time Left:</b> <code>{left // 60:02d}:{left % 60:02d}</code>"
+            "</blockquote>"
         )
-        cancel_txt = (f"🔒 Cancel in {int(CANCEL_LOCK - elapsed)}s" if elapsed < CANCEL_LOCK else "🛑 Cancel & Refund")
+        cancel_txt = f"🔒 Cancel ({int(CANCEL_LOCK - elapsed)}s)" if elapsed < CANCEL_LOCK else "🛑 Cancel & Refund"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [btn("📋 Copy Number", copy_text=CopyTextButton(text=f"+{task['phone']}"))],
-            [btn(cancel_txt, f"s3x:{task['activation_id']}", style="danger" if elapsed < CANCEL_LOCK else "success")],
+            [btn(cancel_txt, f"s3x:{task['activation_id']}")],
         ])
         return text, kb
 
@@ -1870,11 +1626,10 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
     def end_kb(task):
         return InlineKeyboardMarkup(inline_keyboard=[
             [btn("🔄 Buy Again", f"s3o:{task['sid']}:{task['country_id']}:{task['operator']}")],
-            [btn("⬅️ Server 3 Menu", "s3_user_root")],
+            [btn("⬅️ All Apps Menu", "s3_user_root")],
         ])
 
     async def close_task(act_id, new_status, **extra):
-        """Atomic active -> new_status. Only the winner gets the doc (prevents double refund)."""
         return await dbq(tasks_col.find_one_and_update,
                          {"activation_id": act_id, "status": "active"},
                          {"$set": {"status": new_status, **extra}})
@@ -1884,10 +1639,14 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             return
         await dbq(users_col.update_one, {"_id": task["user_id"]}, {"$inc": {"balance": task["price"]}})
         await loyalty.arefund(task["user_id"], task["price"], "s3")
-        await safe_edit(task, f"{reason_text}\n💰 <b>Refunded:</b> {_fmt(task['price'])}", end_kb(task))
+        await safe_edit(
+            task,
+            "<h2>↩️ Order Refunded</h2>"
+            f"<blockquote>{reason_text}<br>💰 <b>Refunded:</b> <code>{_fmt(task['price'])}</code></blockquote>",
+            end_kb(task),
+        )
 
     def mask_purchase_number(phone):
-        """Show exactly the first half of the number and blur the rest in logs."""
         raw = str(phone or "").strip()
         digits = re.sub(r"\D", "", raw)
         if not digits:
@@ -1899,23 +1658,29 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
         if await close_task(task["activation_id"], "completed", otp=otp) is None:
             return
         await client.finish(task["activation_id"])
+        now_utc = datetime.utcnow()
         await dbq(orders_col.insert_one, {
             "user_id": task["user_id"], "number": task["phone"], "service": task["service"],
-            "price": task["price"], "cost_inr": task.get("cost_inr"), "otp": otp,
-            "server": "Server 3", "status": "purchased", "date": datetime.utcnow(),
+            "country": task["country"], "price": task["price"], "cost_inr": task.get("cost_inr"),
+            "otp": otp, "server": "Server 3", "status": "purchased",
+            "date": now_utc, "created_at": now_utc,
         })
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [btn("📋 Copy OTP", copy_text=CopyTextButton(text=str(otp)[:256]))],
             [btn("🔄 Buy Again", f"s3o:{task['sid']}:{task['country_id']}:{task['operator']}"),
              btn("⬅️ Menu", "s3_user_root")],
         ])
-        await safe_edit(task,
-            "✅ <b>Order Completed</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"📞 <b>Number:</b> <code>+{task['phone']}</code>\n"
-            f"📦 <b>Service:</b> {escape(task['service'])}\n"
-            f"🌍 <b>Country:</b> {flag_for(task['country'])} {escape(task['country'])} · Operator {task['operator']}\n"
-            f"💬 <b>OTP:</b> <code>{escape(str(otp))}</code>", kb)
-        # extra message after the OTP alert: security tips for WhatsApp accounts
+        await safe_edit(
+            task,
+            "<h2>✅ OTP Received</h2>"
+            "<blockquote>"
+            f"📞 <b>Number:</b> <code>+{task['phone']}</code><br>"
+            f"📦 <b>App:</b> {escape(task['service'])}<br>"
+            f"🌍 <b>Country:</b> {flag_for(task['country'])} {escape(task['country'])}<br>"
+            f"🔑 <b>OTP Code:</b> <code>{escape(str(otp))}</code>"
+            "</blockquote>",
+            kb,
+        )
         if norm(task.get("service", "")).startswith("whatsapp"):
             try:
                 await bot.send_message(task["chat_id"], premiumize_text(WHATSAPP_SECURITY_TIPS), parse_mode="HTML")
@@ -1925,34 +1690,42 @@ def register_server3_handlers(dp: Dispatcher, bot: Bot, db, users_col, orders_co
             u = await dbq(users_col.find_one, {"_id": task["user_id"]}) or {}
             uname = u.get("username") or f"User_{task['user_id']}"
             me = await bot.get_me()
+            bot_uname = getattr(me, "username", None) or BOT_USERNAME
             sales_kb = InlineKeyboardMarkup(inline_keyboard=[[btn(
-                f"🛒 Buy {task['country']} Now",
-                url=f"https://t.me/{me.username}?start=buy_s3_{task['sid']}_{task['country_id']}", style="success")]])
+                "🛒 Buy Now",
+                url=f"https://t.me/{bot_uname}?start=buy_s3_{task['sid']}_{task['country_id']}",
+            )]])
             masked_number = mask_purchase_number(task["phone"])
             country_display = f"{flag_for(task['country'])} {escape(task['country'])}"
-            # Successful-purchase logs intentionally never expose the full phone number or OTP.
+            app_icon = _premium_tag("📲", app_custom_emoji_id(task["service"]))
             sales_text = (
-                "✅ <b>Successful Server 3 Purchase</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"{_lf.role('application')} <b>Application:</b> {_lf.app_html(task['service'], app_custom_emoji_id(task['service']))}\n"
-                f"{_lf.role('server')} <b>Server:</b> Server 3\n"
-                f"{_lf.role('country')} <b>Country:</b> {country_display}\n"
-                f"{_lf.role('number')} <b>Number:</b> <code>{escape(masked_number)}</code>\n"
-                f"{_lf.role('sold')} <b>Sold For:</b> {_fmt(task['price'])}"
+                "<h2>✅ New Virtual Number Purchased</h2>"
+                "<blockquote>"
+                f"🌍 <b>Country:</b> {country_display}<br>"
+                f"{app_icon} <b>Application:</b> {escape(task['service'])}<br>"
+                f"📞 <b>Number:</b> <code>{escape(masked_number)}</code><br>"
+                "🔑 <b>OTP:</b> <span class='tg-spoiler'>••••••</span><br>"
+                "🌐 <b>Server:</b> <code>All Apps</code><br>"
+                f"💰 <b>Price:</b> <code>{_fmt(task['price'])}</code>"
+                "</blockquote>"
+                f"<p><b>• @{escape(bot_uname)} || @{escape(UPDATES_CHANNEL)}</b></p>"
             )
             await bot.send_message(SALES_CHANNEL, premiumize_text(sales_text),
                                    reply_markup=sales_kb, parse_mode="HTML")
             profit = ""
             if task.get("cost_inr") is not None:
                 pf = task["price"] - task["cost_inr"]
-                profit = f"\n📈 <b>Estimated profit:</b> ₹{pf:.2f}"
+                profit = f"<br>📈 <b>Profit:</b> <code>₹{pf:.2f}</code>"
             admin_text = (
-                "📢 <b>Successful Server 3 Purchase</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 <b>User:</b> @{escape(uname)} (<code>{task['user_id']}</code>)\n"
-                f"{_lf.role('application')} <b>Application:</b> {_lf.app_html(task['service'], app_custom_emoji_id(task['service']))}\n"
-                f"{_lf.role('server')} <b>Server:</b> Server 3\n"
-                f"{_lf.role('country')} <b>Country:</b> {country_display} · Op {escape(str(task['operator']))}\n"
-                f"{_lf.role('number')} <b>Number:</b> <code>{escape(masked_number)}</code>\n"
-                f"{_lf.role('sold')} <b>Sold For:</b> {_fmt(task['price'])}{profit}"
+                "<h2>📢 New Virtual Number Purchased</h2>"
+                "<blockquote>"
+                f"👤 <b>Buyer:</b> @{escape(uname)} (<code>{task['user_id']}</code>)<br>"
+                f"🌍 <b>Country:</b> {country_display} (<code>Op {escape(str(task['operator']))}</code>)<br>"
+                f"{app_icon} <b>Application:</b> {escape(task['service'])}<br>"
+                "🌐 <b>Server:</b> <code>All Apps</code><br>"
+                f"📞 <b>Number:</b> <code>{escape(masked_number)}</code><br>"
+                f"💰 <b>Price:</b> <code>{_fmt(task['price'])}</code>{profit}"
+                "</blockquote>"
             )
             await bot.send_message(ADMIN_LOG_CHANNEL, premiumize_text(admin_text), parse_mode="HTML")
         except Exception as e:
@@ -2090,8 +1863,12 @@ async def send_s3_operator_menu_direct(target_msg: Message, service: str, countr
     if not rows:
         kb = InlineKeyboardMarkup(inline_keyboard=[[btn("📂 Choose another country", f"s3s:{sid}:0")]])
         return await target_msg.answer(f"❌ <b>{escape(country_name)}</b> is currently out of stock on Server 3.", reply_markup=kb)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("📶 Choose operator", f"s3c:{sid}:{cid}", style="success")],
-                                               [btn("⬅️ Server 3 Menu", "s3_user_root")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn("📶 Select Operator", f"s3c:{sid}:{cid}")],
+        [btn("⬅️ All Apps Menu", "s3_user_root")],
+    ])
     await target_msg.answer(
-        f"📦 <b>{escape(entry_name(cat[sid], sid))}</b> · {flag_for(names[cid])} {escape(names[cid])}\nTap below to see live operators &amp; prices.",
-        reply_markup=kb)
+        f"<h2>📲 {escape(entry_name(cat[sid], sid))}</h2>"
+        f"<blockquote>🌍 <b>Country:</b> {flag_for(names[cid])} {escape(names[cid])}</blockquote>",
+        reply_markup=kb,
+    )

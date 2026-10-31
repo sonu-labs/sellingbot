@@ -91,10 +91,11 @@ _PACK_ORDER = (
     "Superior_Emoji.txt",
     "KripanshEmojis_by_fStikBot.txt",
     "NewsEmoji.txt",
+    "RestrictedEmoji.txt",
 )
 _EMOJI_DIR = Path(__file__).with_name("EMOJI_IDS")
 
-# Owner-supplied custom emoji IDs for the 47 UI emojis + API Docs
+# Owner-supplied custom emoji IDs for UI badges + API Docs (flags come from RestrictedEmoji.txt)
 _OWNER_CUSTOM_EMOJI_IDS: dict[str, str] = {
     "🛒": "5201850941925531200",   # Buy badge
     "🏪": "5202058053838483782",   # Shop badge
@@ -151,21 +152,6 @@ _OWNER_CUSTOM_EMOJI_IDS: dict[str, str] = {
     "▪": "5875091588174059190",
     "🔹": "5980787993139481991",   # Blue spark
     "🟡": "5915735340437474837",   # Yellow status dot
-    "🏴": "5294236848103643477",   # Flag icon
-    "🇦🇷": "5292208210495689627",   # Argentina
-    "🇧🇷": "5291892229751723900",   # Brazil
-    "🇨🇦": "5292290347450259214",   # Canada
-    "🇨🇴": "5294010206974397371",   # Colombia
-    "🇮🇩": "5294378161117614233",   # Indonesia
-    "🇮🇷": "5294220170745630736",   # Iran
-    "🇰🇿": "5294227175837290463",   # Kazakhstan
-    "🇲🇽": "5294535073452809778",   # Mexico
-    "🇵🇭": "5291798075478661634",   # Philippines
-    "🇺🇦": "5294263837678131580",   # Ukraine
-    "🇺🇸": "5294244076533600593",   # United States
-    "🇬🇧": "5293993521026453119",   # United Kingdom
-    "🇻🇳": "5294235963340379688",   # Vietnam
-    "🇿🇦": "5294325281480266304",   # South Africa
     "📘": API_DOCS_EMOJI_ID,       # API Docs icon
     "📚": API_DOCS_EMOJI_ID,
     "✈️": TELEGRAM_EMOJI_ID,
@@ -174,6 +160,36 @@ _OWNER_CUSTOM_EMOJI_IDS: dict[str, str] = {
 
 # Symbols that must remain plain Unicode characters (per owner request: "◍➔ ➜ → ← Ye sa aisa he rendo")
 _PLAIN_UNICODE_SYMBOLS = {"◍", "➔", "➜", "→", "←"}
+
+
+def _load_restricted_flag_maps() -> tuple[dict[str, str], dict[str, str]]:
+    """Load country & subdivision flag custom emoji IDs strictly from RestrictedEmoji.txt."""
+    alpha2_map: dict[str, str] = {}
+    unicode_map: dict[str, str] = {}
+    try:
+        records = json.loads((_EMOJI_DIR / "RestrictedEmoji.txt").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        log.warning("Could not load RestrictedEmoji.txt flag pack: %s", exc)
+        return alpha2_map, unicode_map
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        em = str(item.get("emoji") or "")
+        cid = str(item.get("custom_emoji_id") or item.get("id") or "")
+        if not em or not cid:
+            continue
+        regs = [c for c in em if 0x1F1E6 <= ord(c) <= 0x1F1FF]
+        if len(regs) == 2:
+            a2 = "".join(chr(ord("A") + ord(c) - 0x1F1E6) for c in regs)
+            alpha2_map[a2] = cid
+            unicode_map[em] = cid
+        elif any(ch in em for ch in ("🏴", "🏳", "🚩", "🏁", "🎌")):
+            unicode_map[em] = cid
+            unicode_map[em.rstrip("\ufe0f")] = cid
+    return alpha2_map, unicode_map
+
+
+RESTRICTED_FLAG_EMOJI_IDS, RESTRICTED_FLAG_UNICODE_IDS = _load_restricted_flag_maps()
 
 
 def _register_emoji(mapping: dict[str, str], emoji: str, custom_id: str, overwrite: bool = False) -> None:
@@ -207,6 +223,10 @@ def _load_emoji_ids() -> dict[str, str]:
                 # First pack wins, so the icon packs keep priority.
                 _register_emoji(result, emoji, custom_id, overwrite=False)
 
+    # All flag custom emoji IDs come strictly from RestrictedEmoji.txt.
+    for flag_emoji, custom_id in RESTRICTED_FLAG_UNICODE_IDS.items():
+        _register_emoji(result, flag_emoji, custom_id, overwrite=True)
+
     # Apply explicit owner custom emoji IDs with highest priority.
     for emoji, custom_id in _OWNER_CUSTOM_EMOJI_IDS.items():
         _register_emoji(result, emoji, custom_id, overwrite=True)
@@ -225,8 +245,11 @@ _EMOJI_PATTERN = (
     if _SORTED_EMOJIS
     else re.compile(r"(?!x)x")
 )
-# Split by complete <tg-emoji>...</tg-emoji> blocks first so they are never double-wrapped.
-_TAG_SPLIT = re.compile(r"(<tg-emoji\b[^>]*>.*?</tg-emoji>|<[^>]+>)", flags=re.I | re.S)
+# Split by pre/code/tg-emoji blocks first so nested tags are never injected inside monospace blocks.
+_TAG_SPLIT = re.compile(
+    r"(<pre\b[^>]*>.*?</pre>|<code\b[^>]*>.*?</code>|<tg-emoji\b[^>]*>.*?</tg-emoji>|<[^>]+>)",
+    flags=re.I | re.S,
+)
 _INR_AMOUNT = re.compile(r"₹\s*([0-9][0-9,]*(?:\.[0-9]+)?)")
 
 _BLOCK_OPEN_RE = re.compile(
@@ -367,6 +390,59 @@ def _premium_text(text: str) -> str:
     return "".join(parts)
 
 
+def _sanitize_code_and_pre(source: str) -> str:
+    """Ensure ``<code>`` and ``<pre>`` never hold nested tags or emojis.
+
+    Telegram rejects ``sendRichMessage`` (and classic HTML) when ``<tg-emoji>``
+    or inline style tags sit inside ``<code>`` or ``<pre>``. Leading/trailing
+    status emojis inside ``<code>...</code>`` (e.g. ``<code>🟢 OFF</code>`` or
+    ``<code>ON ✅</code>``) are lifted outside ``<code>`` so they still render
+    as Premium custom emojis right next to the monospace badge.
+    """
+    emoji_token = f"(?:{_EMOJI_PATTERN.pattern})|(?:{_UNMAPPED_EMOJI_RE.pattern})"
+    lead_re = re.compile(rf"^\s*((?:(?:{emoji_token})\s*)+)", flags=re.S)
+    trail_re = re.compile(rf"((?:\s*(?:{emoji_token}))+)\s*$", flags=re.S)
+
+    def _clean_pre(match: re.Match) -> str:
+        open_tag, inner, close_tag = match.group(1), match.group(2), match.group(3)
+        inner = re.sub(r"<tg-emoji\b[^>]*>(.*?)</tg-emoji>", r"\1", inner, flags=re.I | re.S)
+        inner = re.sub(r"</?(?!code\b)[a-zA-Z0-9_-]+(?:\s[^>]*)?>", "", inner)
+        inner = strip_plain_emoji(inner) if _EMOJI_PATTERN.search(inner) or _UNMAPPED_EMOJI_RE.search(inner) else inner
+        return f"{open_tag}{inner}{close_tag}"
+
+    def _clean_code(match: re.Match) -> str:
+        open_tag, inner, close_tag = match.group(1), match.group(2), match.group(3)
+        inner = re.sub(r"<tg-emoji\b[^>]*>(.*?)</tg-emoji>", r"\1", inner, flags=re.I | re.S)
+        inner = re.sub(r"<[^>]+>", "", inner)
+        prefix = ""
+        suffix = ""
+        m_lead = lead_re.match(inner)
+        if m_lead:
+            raw_lead = m_lead.group(1).strip()
+            if raw_lead and raw_lead not in _KEEP_PLAIN_SYMBOLS:
+                prefix = raw_lead + " "
+                inner = inner[m_lead.end():]
+        m_trail = trail_re.search(inner)
+        if m_trail:
+            raw_trail = m_trail.group(1).strip()
+            if raw_trail and raw_trail not in _KEEP_PLAIN_SYMBOLS:
+                suffix = " " + raw_trail
+                inner = inner[:m_trail.start()]
+        if _EMOJI_PATTERN.search(inner) or _UNMAPPED_EMOJI_RE.search(inner):
+            inner = strip_plain_emoji(inner)
+        inner_stripped = inner.strip()
+        if not inner_stripped:
+            return (prefix + suffix).strip()
+        return f"{prefix}{open_tag}{inner}{close_tag}{suffix}"
+
+    out = re.sub(r"(<pre\b[^>]*>)(.*?)(</pre>)", _clean_pre, source, flags=re.I | re.S)
+    # Sanitize standalone <code>...</code> spans outside <pre> blocks.
+    parts = re.split(r"(<pre\b[^>]*>.*?</pre>)", out, flags=re.I | re.S)
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r"(<code\b[^>]*>)(.*?)(</code>)", _clean_code, parts[i], flags=re.I | re.S)
+    return "".join(parts)
+
+
 def to_rich_html(text: str, parse_mode: Any = "HTML") -> str:
     """Convert classic Telegram HTML/plain text into valid Rich HTML.
 
@@ -387,9 +463,10 @@ def to_rich_html(text: str, parse_mode: Any = "HTML") -> str:
         source,
         flags=re.IGNORECASE | re.DOTALL,
     )
+    source = _sanitize_code_and_pre(source)
 
-    # Preserve literal newlines in preformatted blocks; normalize breaks elsewhere.
-    chunks = re.split(r"(<pre(?:\s[^>]*)?>.*?</pre>)", source, flags=re.I | re.S)
+    # Preserve literal newlines in preformatted/code blocks; normalize breaks elsewhere.
+    chunks = re.split(r"(<pre(?:\s[^>]*)?>.*?</pre>|<code(?:\s[^>]*)?>.*?</code>)", source, flags=re.I | re.S)
     for idx in range(0, len(chunks), 2):
         seg = chunks[idx].replace("\r\n", "\n").replace("\r", "\n")
         # Remove newlines immediately surrounding block tags so they don't turn into <br>
@@ -436,6 +513,7 @@ def to_classic_html(text: str, parse_mode: Any = "HTML") -> str:
         source,
         flags=re.IGNORECASE | re.DOTALL,
     )
+    source = _sanitize_code_and_pre(source)
     source = re.sub(r"<img\b[^>]*/?>", "", source, flags=re.I)
     source = re.sub(r"<h[1-6]\b[^>]*>(.*?)</h[1-6]>", r"<b>\1</b>\n\n", source, flags=re.I | re.S)
     source = re.sub(r"<p\b[^>]*>(.*?)</p>", r"\1\n\n", source, flags=re.I | re.S)
@@ -809,6 +887,46 @@ def _upgrade_method(method: Any, currency: str | None = None) -> Any:
     return method
 
 
+# Target/state errors that have nothing to do with Rich Message formatting.
+# Never downgrade a Rich Message to classic text or log "Rich message rejected"
+# when Telegram reports one of these errors.
+_NON_RICH_BAD_REQUEST_RE = re.compile(
+    r"message is not modified"
+    r"|chat not found"
+    r"|user not found"
+    r"|peer_id_invalid"
+    r"|bot was blocked"
+    r"|bot was kicked"
+    r"|have no rights"
+    r"|not enough rights"
+    r"|message to edit not found"
+    r"|message can't be edited"
+    r"|there is no text in the message"
+    r"|message identifier is not specified"
+    r"|query is too old",
+    flags=re.I,
+)
+
+
+def _strip_custom_emoji_from_rich(upgraded: Any) -> Any | None:
+    """Keep Rich Message card layout even if a custom emoji ID is rejected."""
+    rm_obj = getattr(upgraded, "rich_message", None)
+    if rm_obj is None or getattr(rm_obj, "html", None) is None:
+        return None
+    clean_html = re.sub(r"<tg-emoji\b[^>]*>(.*?)</tg-emoji>", r"\1", rm_obj.html, flags=re.I | re.S)
+    new_rm = rm_obj.model_copy(update={"html": clean_html})
+    updates: dict[str, Any] = {"rich_message": new_rm}
+    markup = getattr(upgraded, "reply_markup", None)
+    if isinstance(markup, InlineKeyboardMarkup):
+        updates["reply_markup"] = markup.model_copy(update={
+            "inline_keyboard": [[
+                button.model_copy(update={"style": None, "icon_custom_emoji_id": None})
+                for button in row
+            ] for row in markup.inline_keyboard]
+        })
+    return upgraded.model_copy(update=updates)
+
+
 class RichBot(Bot):
     """Aiogram Bot that transparently upgrades all normal text to Rich Messages."""
 
@@ -839,6 +957,19 @@ class RichBot(Bot):
                 # No classic fallback exists for this method type (e.g.
                 # answerCallbackQuery toasts); surface the original error.
                 raise
+            if _NON_RICH_BAD_REQUEST_RE.search(str(exc)):
+                # Chat/edit-target state error (e.g. "chat not found" or
+                # "message is not modified") — re-raise directly so Rich
+                # Messages are never overwritten with classic text.
+                raise
+            if "document_invalid" in str(exc).lower() or "custom_emoji" in str(exc).lower():
+                rich_no_custom = _strip_custom_emoji_from_rich(upgraded)
+                if rich_no_custom is not None:
+                    try:
+                        return await super().__call__(rich_no_custom, request_timeout=request_timeout)
+                    except TelegramBadRequest as inner_exc:
+                        if _NON_RICH_BAD_REQUEST_RE.search(str(inner_exc)):
+                            raise
             # Keep the complete old behavior as a compatibility/error fallback.
             log.warning("Rich message rejected; using classic fallback: %s", exc)
             updates: dict[str, Any] = {"reply_markup": premium_markup(method.reply_markup, currency)}
