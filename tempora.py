@@ -46,6 +46,8 @@ PRIORITY_COUNTRIES = [
     "canada", "ukraine", "kazakhstan", "argentina", "iran", "brazil",
     "united kingdom", "england", "russia", "nigeria", "turkey", "pakistan",
     "bangladesh", "mexico", "south africa", "colombia", "malaysia", "thailand",
+    "germany", "france", "spain", "italy", "poland", "netherlands",
+    "egypt", "morocco", "kenya", "chile", "peru", "myanmar",
 ]
 
 LEGACY_NAMES = {
@@ -907,8 +909,8 @@ class TemporaClient:
         other_items.sort(key=lambda x: x[0])
         pri_cids = [cid for _, cid in pri_items]
         if not pri_cids:
-            pri_cids = [cid for _, cid in other_items[:18]]
-            other_cids = [cid for _, cid in other_items[18:]]
+            pri_cids = [cid for _, cid in other_items[:24]]
+            other_cids = [cid for _, cid in other_items[24:]]
         else:
             other_cids = [cid for _, cid in other_items]
 
